@@ -12,15 +12,27 @@ import type {
   ChannelId,
   ChannelMessageActionName,
   ChannelThreadingToolContext,
-} from "../../channels/plugins/types.js";
-import type { OpenClawConfig } from "../../config/config.js";
+} from "../../channels/plugins/types.public.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { hasInteractiveReplyBlocks, hasReplyPayloadContent } from "../../interactive/payload.js";
+import type { OutboundMediaAccess } from "../../media/load-options.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
+import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
 import { hasPollCreationParams } from "../../poll-params.js";
 import { resolvePollMaxSelections } from "../../polls.js";
 import { buildChannelAccountBindings } from "../../routing/bindings.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
-import { type GatewayClientMode, type GatewayClientName } from "../../utils/message-channel.js";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "../../shared/string-coerce.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+  type GatewayClientMode,
+  type GatewayClientName,
+} from "../../utils/message-channel.js";
+import { formatErrorMessage } from "../errors.js";
 import { throwIfAborted } from "./abort.js";
 import { resolveOutboundChannelPlugin } from "./channel-resolution.js";
 import {
@@ -30,6 +42,7 @@ import {
 import type { OutboundSendDeps } from "./deliver.js";
 import { normalizeMessageActionInput } from "./message-action-normalization.js";
 import {
+  collectActionMediaSourceHints,
   hydrateAttachmentParamsForAction,
   normalizeSandboxMediaList,
   normalizeSandboxMediaParams,
@@ -39,7 +52,12 @@ import {
   parseInteractiveParam,
   readBooleanParam,
   resolveAttachmentMediaPolicy,
+  resolveExtraActionMediaSourceParamKeys,
 } from "./message-action-params.js";
+import {
+  prepareOutboundMirrorRoute,
+  resolveAndApplyOutboundThreadId,
+} from "./message-action-threading.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import {
   applyCrossContextDecoration,
@@ -62,32 +80,13 @@ export type MessageActionRunnerGateway = {
   mode: GatewayClientMode;
 };
 
-function resolveAndApplyOutboundThreadId(
-  params: Record<string, unknown>,
-  ctx: {
-    cfg: OpenClawConfig;
-    channel: ChannelId;
-    to: string;
-    accountId?: string | null;
-    toolContext?: ChannelThreadingToolContext;
-  },
-): string | undefined {
-  const threadId = readStringParam(params, "threadId");
-  const resolved =
-    threadId ??
-    getChannelPlugin(ctx.channel)?.threading?.resolveAutoThreadId?.({
-      cfg: ctx.cfg,
-      accountId: ctx.accountId,
-      to: ctx.to,
-      toolContext: ctx.toolContext,
-      replyToId: readStringParam(params, "replyTo"),
-    });
-  // Write auto-resolved threadId back into params so downstream dispatch
-  // (plugin `readStringParam(params, "threadId")`) picks it up.
-  if (resolved && !params.threadId) {
-    params.threadId = resolved;
-  }
-  return resolved ?? undefined;
+let messageActionGatewayRuntimePromise: Promise<
+  typeof import("./message.gateway.runtime.js")
+> | null = null;
+
+function loadMessageActionGatewayRuntime() {
+  messageActionGatewayRuntimePromise ??= import("./message.gateway.runtime.js");
+  return messageActionGatewayRuntimePromise;
 }
 
 export type RunMessageActionParams = {
@@ -95,7 +94,12 @@ export type RunMessageActionParams = {
   action: ChannelMessageActionName;
   params: Record<string, unknown>;
   defaultAccountId?: string;
+  requesterAccountId?: string | null;
   requesterSenderId?: string | null;
+  requesterSenderName?: string | null;
+  requesterSenderUsername?: string | null;
+  requesterSenderE164?: string | null;
+  senderIsOwner?: boolean;
   sessionId?: string;
   toolContext?: ChannelThreadingToolContext;
   gateway?: MessageActionRunnerGateway;
@@ -162,6 +166,45 @@ export function getToolResult(
   return "toolResult" in result ? result.toolResult : undefined;
 }
 
+function resolveGatewayActionOptions(gateway?: MessageActionRunnerGateway) {
+  return {
+    url: gateway?.url,
+    token: gateway?.token,
+    timeoutMs:
+      typeof gateway?.timeoutMs === "number" && Number.isFinite(gateway.timeoutMs)
+        ? Math.max(1, Math.floor(gateway.timeoutMs))
+        : 10_000,
+    clientName: gateway?.clientName ?? GATEWAY_CLIENT_NAMES.CLI,
+    clientDisplayName: gateway?.clientDisplayName,
+    mode: gateway?.mode ?? GATEWAY_CLIENT_MODES.CLI,
+  };
+}
+
+async function callGatewayMessageAction<T>(params: {
+  gateway?: MessageActionRunnerGateway;
+  actionParams: Record<string, unknown>;
+}): Promise<T> {
+  const { callGatewayLeastPrivilege } = await loadMessageActionGatewayRuntime();
+  const gateway = resolveGatewayActionOptions(params.gateway);
+  return await callGatewayLeastPrivilege<T>({
+    url: gateway.url,
+    token: gateway.token,
+    method: "message.action",
+    params: params.actionParams,
+    timeoutMs: gateway.timeoutMs,
+    clientName: gateway.clientName,
+    clientDisplayName: gateway.clientDisplayName,
+    mode: gateway.mode,
+  });
+}
+
+async function resolveGatewayActionIdempotencyKey(idempotencyKey?: string): Promise<string> {
+  if (idempotencyKey) {
+    return idempotencyKey;
+  }
+  const { randomIdempotencyKey } = await loadMessageActionGatewayRuntime();
+  return randomIdempotencyKey();
+}
 function applyCrossContextMessageDecoration({
   params,
   message,
@@ -241,47 +284,69 @@ async function resolveActionTarget(params: {
   accountId?: string | null;
 }): Promise<ResolvedMessagingTarget | undefined> {
   let resolvedTarget: ResolvedMessagingTarget | undefined;
-  const toRaw = typeof params.args.to === "string" ? params.args.to.trim() : "";
+  const toRaw = normalizeOptionalString(params.args.to) ?? "";
   if (toRaw) {
-    const resolved = await resolveChannelTarget({
+    const resolved = await resolveResolvedTargetOrThrow({
       cfg: params.cfg,
       channel: params.channel,
       input: toRaw,
       accountId: params.accountId ?? undefined,
     });
-    if (resolved.ok) {
-      params.args.to = resolved.target.to;
-      resolvedTarget = resolved.target;
-    } else {
-      throw resolved.error;
-    }
+    params.args.to = resolved.to;
+    resolvedTarget = resolved;
   }
-  const channelIdRaw =
-    typeof params.args.channelId === "string" ? params.args.channelId.trim() : "";
+  const channelIdRaw = normalizeOptionalString(params.args.channelId) ?? "";
   if (channelIdRaw) {
-    const resolved = await resolveChannelTarget({
+    const resolved = await resolveResolvedTargetOrThrow({
       cfg: params.cfg,
       channel: params.channel,
       input: channelIdRaw,
       accountId: params.accountId ?? undefined,
       preferredKind: "group",
+      validateResolvedTarget: (target) =>
+        target.kind === "user"
+          ? `Channel id "${channelIdRaw}" resolved to a user target.`
+          : undefined,
     });
-    if (resolved.ok) {
-      if (resolved.target.kind === "user") {
-        throw new Error(`Channel id "${channelIdRaw}" resolved to a user target.`);
-      }
-      params.args.channelId = resolved.target.to.replace(/^(channel|group):/i, "");
-    } else {
-      throw resolved.error;
-    }
+    params.args.channelId = sanitizeGroupTargetId(resolved.to);
   }
   return resolvedTarget;
+}
+
+function sanitizeGroupTargetId(target: string): string {
+  return target.replace(/^(channel|group):/i, "");
+}
+
+async function resolveResolvedTargetOrThrow(params: {
+  cfg: OpenClawConfig;
+  channel: ChannelId;
+  input: string;
+  accountId?: string;
+  preferredKind?: "group" | "user" | "channel";
+  validateResolvedTarget?: (target: ResolvedMessagingTarget) => string | undefined;
+}): Promise<ResolvedMessagingTarget> {
+  const resolved = await resolveChannelTarget({
+    cfg: params.cfg,
+    channel: params.channel,
+    input: params.input,
+    accountId: params.accountId,
+    preferredKind: params.preferredKind,
+  });
+  if (!resolved.ok) {
+    throw resolved.error;
+  }
+  const validationError = params.validateResolvedTarget?.(resolved.target);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+  return resolved.target;
 }
 
 type ResolvedActionContext = {
   cfg: OpenClawConfig;
   params: Record<string, unknown>;
   channel: ChannelId;
+  mediaAccess: OutboundMediaAccess;
   accountId?: string | null;
   dryRun: boolean;
   gateway?: MessageActionRunnerGateway;
@@ -318,14 +383,16 @@ async function handleBroadcastAction(
     throw new Error("Broadcast requires at least one target in --targets.");
   }
   const channelHint = readStringParam(params, "channel");
-  const configured = await listConfiguredMessageChannels(input.cfg);
-  if (configured.length === 0) {
-    throw new Error("Broadcast requires at least one configured channel.");
-  }
   const targetChannels =
-    channelHint && channelHint.trim().toLowerCase() !== "all"
+    channelHint && normalizeOptionalLowercaseString(channelHint) !== "all"
       ? [await resolveChannel(input.cfg, { channel: channelHint }, input.toolContext)]
-      : configured;
+      : await (async () => {
+          const configured = await listConfiguredMessageChannels(input.cfg);
+          if (configured.length === 0) {
+            throw new Error("Broadcast requires at least one configured channel.");
+          }
+          return configured;
+        })();
   const results: Array<{
     channel: ChannelId;
     to: string;
@@ -339,26 +406,23 @@ async function handleBroadcastAction(
     for (const target of rawTargets) {
       throwIfAborted(input.abortSignal);
       try {
-        const resolved = await resolveChannelTarget({
+        const resolved = await resolveResolvedTargetOrThrow({
           cfg: input.cfg,
           channel: targetChannel,
           input: target,
         });
-        if (!resolved.ok) {
-          throw resolved.error;
-        }
         const sendResult = await runMessageAction({
           ...input,
           action: "send",
           params: {
             ...params,
             channel: targetChannel,
-            target: resolved.target.to,
+            target: resolved.to,
           },
         });
         results.push({
           channel: targetChannel,
-          to: resolved.target.to,
+          to: resolved.to,
           ok: true,
           result: sendResult.kind === "send" ? sendResult.sendResult : undefined,
         });
@@ -370,14 +434,14 @@ async function handleBroadcastAction(
           channel: targetChannel,
           to: target,
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: formatErrorMessage(err),
         });
       }
     }
   }
   return {
     kind: "broadcast",
-    channel: targetChannels[0] ?? "discord",
+    channel: targetChannels[0] ?? normalizeOptionalLowercaseString(channelHint) ?? "unknown",
     action: "broadcast",
     handledBy: input.dryRun ? "dry-run" : "core",
     payload: { results },
@@ -404,8 +468,10 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   // Support media, path, and filePath parameters for attachments
   const mediaHint =
     readStringParam(params, "media", { trim: false }) ??
+    readStringParam(params, "mediaUrl", { trim: false }) ??
     readStringParam(params, "path", { trim: false }) ??
-    readStringParam(params, "filePath", { trim: false });
+    readStringParam(params, "filePath", { trim: false }) ??
+    readStringParam(params, "fileUrl", { trim: false });
   const hasButtons = Array.isArray(params.buttons) && params.buttons.length > 0;
   const hasCard = params.card != null && typeof params.card === "object";
   const hasComponents = params.components != null && typeof params.components === "object";
@@ -431,7 +497,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   const mergedMediaUrls: string[] = [];
   const seenMedia = new Set<string>();
   const pushMedia = (value?: string | null) => {
-    const trimmed = value?.trim();
+    const trimmed = normalizeOptionalString(value);
     if (!trimmed) {
       return;
     }
@@ -494,46 +560,27 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   }
   params.message = message;
   const gifPlayback = readBooleanParam(params, "gifPlayback") ?? false;
-  const forceDocument = readBooleanParam(params, "forceDocument") ?? false;
+  const forceDocument =
+    readBooleanParam(params, "forceDocument") ?? readBooleanParam(params, "asDocument") ?? false;
   const bestEffort = readBooleanParam(params, "bestEffort");
   const silent = readBooleanParam(params, "silent");
 
   const replyToId = readStringParam(params, "replyTo");
-  const resolvedThreadId = resolveAndApplyOutboundThreadId(params, {
+  const { resolvedThreadId, outboundRoute } = await prepareOutboundMirrorRoute({
     cfg,
     channel,
     to,
+    actionParams: params,
     accountId,
     toolContext: input.toolContext,
+    agentId,
+    currentSessionKey: input.sessionKey,
+    dryRun,
+    resolvedTarget,
+    resolveAutoThreadId: getChannelPlugin(channel)?.threading?.resolveAutoThreadId,
+    resolveOutboundSessionRoute,
+    ensureOutboundSessionEntry,
   });
-  const outboundRoute =
-    agentId && !dryRun
-      ? await resolveOutboundSessionRoute({
-          cfg,
-          channel,
-          agentId,
-          accountId,
-          target: to,
-          resolvedTarget,
-          replyToId,
-          threadId: resolvedThreadId,
-        })
-      : null;
-  if (outboundRoute && agentId && !dryRun) {
-    await ensureOutboundSessionEntry({
-      cfg,
-      agentId,
-      channel,
-      accountId,
-      route: outboundRoute,
-    });
-  }
-  if (outboundRoute && !dryRun) {
-    params.__sessionKey = outboundRoute.sessionKey;
-  }
-  if (agentId) {
-    params.__agentId = agentId;
-  }
   const mirrorMediaUrls =
     mergedMediaUrls.length > 0 ? mergedMediaUrls : mediaUrl ? [mediaUrl] : undefined;
   throwIfAborted(abortSignal);
@@ -543,7 +590,16 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       channel,
       params,
       agentId,
+      sessionKey: input.sessionKey,
+      requesterAccountId: input.requesterAccountId ?? undefined,
+      requesterSenderId: input.requesterSenderId ?? undefined,
+      requesterSenderName: input.requesterSenderName ?? undefined,
+      requesterSenderUsername: input.requesterSenderUsername ?? undefined,
+      requesterSenderE164: input.requesterSenderE164 ?? undefined,
+      mediaAccess: ctx.mediaAccess,
       accountId: accountId ?? undefined,
+      senderIsOwner: input.senderIsOwner,
+      sessionId: input.sessionId,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,
@@ -585,7 +641,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
 }
 
 async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActionRunResult> {
-  const { cfg, params, channel, accountId, dryRun, gateway, input, abortSignal } = ctx;
+  const { cfg, params, channel, accountId, dryRun, gateway, input, agentId, abortSignal } = ctx;
   throwIfAborted(abortSignal);
   const action: ChannelMessageActionName = "poll";
   const to = readStringParam(params, "to", { required: true });
@@ -593,10 +649,10 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
 
   const resolvedThreadId = resolveAndApplyOutboundThreadId(params, {
     cfg,
-    channel,
     to,
     accountId,
     toolContext: input.toolContext,
+    resolveAutoThreadId: getChannelPlugin(channel)?.threading?.resolveAutoThreadId,
   });
 
   const base = typeof params.message === "string" ? params.message : "";
@@ -618,6 +674,11 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
       channel,
       params,
       accountId: accountId ?? undefined,
+      agentId,
+      requesterSenderId: input.requesterSenderId ?? undefined,
+      senderIsOwner: input.senderIsOwner,
+      sessionKey: input.sessionKey,
+      sessionId: input.sessionId,
       gateway,
       toolContext: input.toolContext,
       dryRun,
@@ -662,7 +723,18 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
 }
 
 async function handlePluginAction(ctx: ResolvedActionContext): Promise<MessageActionRunResult> {
-  const { cfg, params, channel, accountId, dryRun, gateway, input, abortSignal, agentId } = ctx;
+  const {
+    cfg,
+    params,
+    channel,
+    mediaAccess,
+    accountId,
+    dryRun,
+    gateway,
+    input,
+    abortSignal,
+    agentId,
+  } = ctx;
   throwIfAborted(abortSignal);
   const action = input.action as Exclude<ChannelMessageActionName, "send" | "poll" | "broadcast">;
   if (dryRun) {
@@ -680,14 +752,48 @@ async function handlePluginAction(ctx: ResolvedActionContext): Promise<MessageAc
   if (!plugin?.actions?.handleAction) {
     throw new Error(`Channel ${channel} is unavailable for message actions (plugin not loaded).`);
   }
+  const executionMode = plugin.actions.resolveExecutionMode?.({ action }) ?? "local";
+  if (executionMode === "gateway" && gateway) {
+    // Gateway-owned actions must execute where the live channel runtime exists.
+    const payload = await callGatewayMessageAction<unknown>({
+      gateway,
+      actionParams: {
+        channel,
+        action,
+        params,
+        accountId: accountId ?? undefined,
+        requesterSenderId: input.requesterSenderId ?? undefined,
+        senderIsOwner: input.senderIsOwner,
+        sessionKey: input.sessionKey,
+        sessionId: input.sessionId,
+        agentId,
+        toolContext: input.toolContext,
+        idempotencyKey: await resolveGatewayActionIdempotencyKey(
+          normalizeOptionalString(params.idempotencyKey),
+        ),
+      },
+    });
+    return {
+      kind: "action",
+      channel,
+      action,
+      handledBy: "plugin",
+      payload,
+      dryRun,
+    };
+  }
 
   const handled = await dispatchChannelMessageAction({
     channel,
     action,
     cfg,
     params,
+    mediaAccess,
+    mediaLocalRoots: mediaAccess.localRoots,
+    mediaReadFile: mediaAccess.readFile,
     accountId: accountId ?? undefined,
     requesterSenderId: input.requesterSenderId ?? undefined,
+    senderIsOwner: input.senderIsOwner,
     sessionKey: input.sessionKey,
     sessionId: input.sessionId,
     agentId,
@@ -747,15 +853,44 @@ export async function runMessageAction(
     params.accountId = accountId;
   }
   const dryRun = Boolean(input.dryRun ?? readBooleanParam(params, "dryRun"));
-  const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, resolvedAgentId);
-  const mediaPolicy = resolveAttachmentMediaPolicy({
+  const normalizationPolicy = resolveAttachmentMediaPolicy({
     sandboxRoot: input.sandboxRoot,
-    mediaLocalRoots,
+    mediaLocalRoots: getAgentScopedMediaLocalRoots(cfg, resolvedAgentId),
+  });
+  const extraActionMediaSourceParamKeys = resolveExtraActionMediaSourceParamKeys({
+    cfg,
+    action,
+    args: params,
+    channel,
+    accountId,
+    sessionKey: input.sessionKey,
+    sessionId: input.sessionId,
+    agentId: resolvedAgentId,
+    requesterSenderId: input.requesterSenderId,
+    senderIsOwner: input.senderIsOwner,
   });
 
   await normalizeSandboxMediaParams({
     args: params,
-    mediaPolicy,
+    mediaPolicy: normalizationPolicy,
+    extraParamKeys: extraActionMediaSourceParamKeys,
+  });
+
+  const mediaAccess = resolveAgentScopedOutboundMediaAccess({
+    cfg,
+    agentId: resolvedAgentId,
+    mediaSources: collectActionMediaSourceHints(params, extraActionMediaSourceParamKeys),
+    sessionKey: input.sessionKey,
+    messageProvider: input.sessionKey ? undefined : channel,
+    accountId: input.sessionKey ? (input.requesterAccountId ?? accountId) : accountId,
+    requesterSenderId: input.requesterSenderId,
+    requesterSenderName: input.requesterSenderName,
+    requesterSenderUsername: input.requesterSenderUsername,
+    requesterSenderE164: input.requesterSenderE164,
+  });
+  const mediaPolicy = resolveAttachmentMediaPolicy({
+    sandboxRoot: input.sandboxRoot,
+    mediaAccess,
   });
 
   await hydrateAttachmentParamsForAction({
@@ -795,6 +930,7 @@ export async function runMessageAction(
       cfg,
       params,
       channel,
+      mediaAccess,
       accountId,
       dryRun,
       gateway,
@@ -810,6 +946,7 @@ export async function runMessageAction(
       cfg,
       params,
       channel,
+      mediaAccess,
       accountId,
       dryRun,
       gateway,
@@ -822,6 +959,7 @@ export async function runMessageAction(
     cfg,
     params,
     channel,
+    mediaAccess,
     accountId,
     dryRun,
     gateway,

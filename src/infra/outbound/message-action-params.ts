@@ -1,15 +1,116 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { assertMediaNotDataUrl, resolveSandboxedMediaSource } from "../../agents/sandbox-paths.js";
 import { readStringParam } from "../../agents/tools/common.js";
-import type { ChannelId, ChannelMessageActionName } from "../../channels/plugins/types.js";
-import type { OpenClawConfig } from "../../config/config.js";
+import { resolveChannelMessageToolMediaSourceParamKeys } from "../../channels/plugins/message-action-discovery.js";
+import type { ChannelId, ChannelMessageActionName } from "../../channels/plugins/types.public.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createRootScopedReadFile } from "../../infra/fs-safe.js";
+import { basenameFromMediaSource } from "../../infra/local-file-access.js";
+import {
+  buildOutboundMediaLoadOptions,
+  resolveOutboundMediaAccess,
+  resolveOutboundMediaLocalRoots,
+  type OutboundMediaAccess,
+  type OutboundMediaReadFile,
+} from "../../media/load-options.js";
 import { extensionForMime } from "../../media/mime.js";
 import { loadWebMedia } from "../../media/web-media.js";
+import { resolveSnakeCaseParamKey } from "../../param-key.js";
 import { readBooleanParam as readBooleanParamShared } from "../../plugin-sdk/boolean-param.js";
+import { normalizeOptionalString } from "../../shared/string-coerce.js";
+import { hasPotentialPluginActionParam } from "./message-action-param-keys.js";
 
 export const readBooleanParam = readBooleanParamShared;
+
+export const BASE_ACTION_MEDIA_SOURCE_PARAM_KEYS = [
+  "media",
+  "path",
+  "filePath",
+  "mediaUrl",
+  "fileUrl",
+  "image",
+] as const;
+
+function readMediaParam(args: Record<string, unknown>, key: string): string | undefined {
+  return readStringParam(args, key, { trim: false });
+}
+
+function resolveMediaParamEntry(
+  args: Record<string, unknown>,
+  key: string,
+): { key: string; value: string } | undefined {
+  const resolvedKey = resolveSnakeCaseParamKey(args, key);
+  if (!resolvedKey) {
+    return undefined;
+  }
+  const value = readMediaParam(args, key);
+  if (!value) {
+    return undefined;
+  }
+  return {
+    key: resolvedKey,
+    value,
+  };
+}
+
+function buildActionMediaSourceParamKeys(extraParamKeys?: readonly string[]): string[] {
+  const keys = new Set<string>(BASE_ACTION_MEDIA_SOURCE_PARAM_KEYS);
+  extraParamKeys?.forEach((key) => keys.add(key));
+  return Array.from(keys);
+}
+
+export function resolveExtraActionMediaSourceParamKeys(params: {
+  cfg: OpenClawConfig;
+  action?: ChannelMessageActionName;
+  args: Record<string, unknown>;
+  channel?: string;
+  accountId?: string | null;
+  sessionKey?: string | null;
+  sessionId?: string | null;
+  agentId?: string | null;
+  requesterSenderId?: string | null;
+  senderIsOwner?: boolean;
+}): string[] {
+  if (!hasPotentialPluginActionParam(params.args)) {
+    return [];
+  }
+  return resolveChannelMessageToolMediaSourceParamKeys({
+    cfg: params.cfg,
+    action: params.action,
+    channel: params.channel,
+    accountId: params.accountId,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    agentId: params.agentId,
+    requesterSenderId: params.requesterSenderId,
+    senderIsOwner: params.senderIsOwner,
+  });
+}
+
+export function collectActionMediaSourceHints(
+  args: Record<string, unknown>,
+  extraParamKeys?: readonly string[],
+): string[] {
+  const sources: string[] = [];
+  for (const key of buildActionMediaSourceParamKeys(extraParamKeys)) {
+    const entry = resolveMediaParamEntry(args, key);
+    if (entry && normalizeOptionalString(entry.value)) {
+      sources.push(entry.value);
+    }
+  }
+  return sources;
+}
+
+function readAttachmentMediaHint(args: Record<string, unknown>): string | undefined {
+  return readMediaParam(args, "media") ?? readMediaParam(args, "mediaUrl");
+}
+
+function readAttachmentFileHint(args: Record<string, unknown>): string | undefined {
+  return (
+    readMediaParam(args, "path") ??
+    readMediaParam(args, "filePath") ??
+    readMediaParam(args, "fileUrl")
+  );
+}
 
 function resolveAttachmentMaxBytes(params: {
   cfg: OpenClawConfig;
@@ -47,27 +148,9 @@ function inferAttachmentFilename(params: {
 }): string | undefined {
   const mediaHint = params.mediaHint?.trim();
   if (mediaHint) {
-    try {
-      if (mediaHint.startsWith("file://")) {
-        const filePath = fileURLToPath(mediaHint);
-        const base = path.basename(filePath);
-        if (base) {
-          return base;
-        }
-      } else if (/^https?:\/\//i.test(mediaHint)) {
-        const url = new URL(mediaHint);
-        const base = path.basename(url.pathname);
-        if (base) {
-          return base;
-        }
-      } else {
-        const base = path.basename(mediaHint);
-        if (base) {
-          return base;
-        }
-      }
-    } catch {
-      // fall through to content-type based default
+    const base = basenameFromMediaSource(mediaHint);
+    if (base) {
+      return base;
     }
   }
   const ext = params.contentType ? extensionForMime(params.contentType) : undefined;
@@ -99,12 +182,16 @@ export type AttachmentMediaPolicy =
     }
   | {
       mode: "host";
-      localRoots?: readonly string[];
+      mediaAccess?: OutboundMediaAccess;
+      mediaLocalRoots?: readonly string[] | "any";
+      mediaReadFile?: OutboundMediaReadFile;
     };
 
 export function resolveAttachmentMediaPolicy(params: {
   sandboxRoot?: string;
-  mediaLocalRoots?: readonly string[];
+  mediaAccess?: OutboundMediaAccess;
+  mediaLocalRoots?: readonly string[] | "any";
+  mediaReadFile?: OutboundMediaReadFile;
 }): AttachmentMediaPolicy {
   const sandboxRoot = params.sandboxRoot?.trim();
   if (sandboxRoot) {
@@ -113,9 +200,20 @@ export function resolveAttachmentMediaPolicy(params: {
       sandboxRoot,
     };
   }
+  const explicitLocalRoots = resolveOutboundMediaLocalRoots(params.mediaLocalRoots);
   return {
     mode: "host",
-    localRoots: params.mediaLocalRoots,
+    mediaAccess: resolveOutboundMediaAccess({
+      mediaAccess: params.mediaAccess,
+      mediaLocalRoots: explicitLocalRoots === "any" ? undefined : explicitLocalRoots,
+      mediaReadFile: params.mediaAccess?.readFile ? undefined : params.mediaReadFile,
+    }),
+    ...(explicitLocalRoots !== undefined ? { mediaLocalRoots: explicitLocalRoots } : {}),
+    ...(params.mediaAccess?.readFile
+      ? {}
+      : params.mediaReadFile
+        ? { mediaReadFile: params.mediaReadFile }
+        : {}),
   };
 }
 
@@ -130,7 +228,9 @@ function buildAttachmentMediaLoadOptions(params: {
     }
   | {
       maxBytes?: number;
-      localRoots?: readonly string[];
+      localRoots?: readonly string[] | "any";
+      readFile?: OutboundMediaReadFile;
+      hostReadCapability?: boolean;
     } {
   if (params.policy.mode === "sandbox") {
     const readSandboxFile = createRootScopedReadFile({
@@ -142,10 +242,12 @@ function buildAttachmentMediaLoadOptions(params: {
       readFile: readSandboxFile,
     };
   }
-  return {
+  return buildOutboundMediaLoadOptions({
     maxBytes: params.maxBytes,
-    localRoots: params.policy.localRoots,
-  };
+    mediaAccess: params.policy.mediaAccess,
+    mediaLocalRoots: params.policy.mediaLocalRoots,
+    mediaReadFile: params.policy.mediaReadFile,
+  });
 }
 
 async function hydrateAttachmentPayload(params: {
@@ -206,22 +308,22 @@ async function hydrateAttachmentPayload(params: {
 export async function normalizeSandboxMediaParams(params: {
   args: Record<string, unknown>;
   mediaPolicy: AttachmentMediaPolicy;
+  extraParamKeys?: readonly string[];
 }): Promise<void> {
   const sandboxRoot =
     params.mediaPolicy.mode === "sandbox" ? params.mediaPolicy.sandboxRoot.trim() : undefined;
-  const mediaKeys: Array<"media" | "path" | "filePath"> = ["media", "path", "filePath"];
-  for (const key of mediaKeys) {
-    const raw = readStringParam(params.args, key, { trim: false });
-    if (!raw) {
+  for (const key of buildActionMediaSourceParamKeys(params.extraParamKeys)) {
+    const entry = resolveMediaParamEntry(params.args, key);
+    if (!entry) {
       continue;
     }
-    assertMediaNotDataUrl(raw);
+    assertMediaNotDataUrl(entry.value);
     if (!sandboxRoot) {
       continue;
     }
-    const normalized = await resolveSandboxedMediaSource({ media: raw, sandboxRoot });
-    if (normalized !== raw) {
-      params.args[key] = normalized;
+    const normalized = await resolveSandboxedMediaSource({ media: entry.value, sandboxRoot });
+    if (normalized !== entry.value) {
+      params.args[entry.key] = normalized;
     }
   }
 }
@@ -261,10 +363,8 @@ async function hydrateAttachmentActionPayload(params: {
   allowMessageCaptionFallback?: boolean;
   mediaPolicy: AttachmentMediaPolicy;
 }): Promise<void> {
-  const mediaHint = readStringParam(params.args, "media", { trim: false });
-  const fileHint =
-    readStringParam(params.args, "path", { trim: false }) ??
-    readStringParam(params.args, "filePath", { trim: false });
+  const mediaHint = readAttachmentMediaHint(params.args);
+  const fileHint = readAttachmentFileHint(params.args);
   const contentTypeParam =
     readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
 
@@ -298,7 +398,12 @@ export async function hydrateAttachmentParamsForAction(params: {
   dryRun?: boolean;
   mediaPolicy: AttachmentMediaPolicy;
 }): Promise<void> {
-  if (params.action !== "sendAttachment" && params.action !== "setGroupIcon") {
+  const shouldHydrateUploadFile = params.action === "upload-file";
+  if (
+    params.action !== "sendAttachment" &&
+    params.action !== "setGroupIcon" &&
+    !shouldHydrateUploadFile
+  ) {
     return;
   }
   await hydrateAttachmentActionPayload({
@@ -308,7 +413,7 @@ export async function hydrateAttachmentParamsForAction(params: {
     args: params.args,
     dryRun: params.dryRun,
     mediaPolicy: params.mediaPolicy,
-    allowMessageCaptionFallback: params.action === "sendAttachment",
+    allowMessageCaptionFallback: params.action === "sendAttachment" || shouldHydrateUploadFile,
   });
 }
 
