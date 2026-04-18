@@ -206,6 +206,28 @@ def prepare_beta_release!(version:, build_number:)
   beta_xcconfig
 end
 
+def build_beta_export_options
+  app_bundle_id = ENV["OPENCLAW_APP_BUNDLE_ID"]
+  share_bundle_id = ENV["OPENCLAW_SHARE_BUNDLE_ID"]
+  widget_bundle_id = ENV["OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID"]
+  watch_app_bundle_id = ENV["OPENCLAW_WATCH_APP_BUNDLE_ID"]
+  watch_extension_bundle_id = ENV["OPENCLAW_WATCH_EXTENSION_BUNDLE_ID"]
+
+  profile_mapping = {}
+  profile_mapping[app_bundle_id] = "#{app_bundle_id} AppStore" if env_present?(app_bundle_id)
+  profile_mapping[share_bundle_id] = "#{share_bundle_id} AppStore" if env_present?(share_bundle_id)
+  profile_mapping[widget_bundle_id] = "#{widget_bundle_id} AppStore" if env_present?(widget_bundle_id)
+  profile_mapping[watch_app_bundle_id] = "#{watch_app_bundle_id} AppStore" if env_present?(watch_app_bundle_id)
+  profile_mapping[watch_extension_bundle_id] = "#{watch_extension_bundle_id} AppStore" if env_present?(watch_extension_bundle_id)
+
+  options = {
+    signingStyle: "manual",
+    provisioningProfiles: profile_mapping
+  }
+  options[:teamID] = ENV["OPENCLAW_DEVELOPMENT_TEAM"] if env_present?(ENV["OPENCLAW_DEVELOPMENT_TEAM"])
+  options
+end
+
 def build_beta_release(context)
   version = context[:version]
   output_directory = File.join("build", "beta")
@@ -225,9 +247,7 @@ def build_beta_release(context)
     xcargs: "-allowProvisioningUpdates",
     export_xcargs: "-allowProvisioningUpdates",
     xcodebuild_formatter: "",
-    export_options: {
-      signingStyle: "automatic"
-    }
+    export_options: build_beta_export_options
   )
 
   {
