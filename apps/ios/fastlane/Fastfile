@@ -2,9 +2,28 @@ require "shellwords"
 require "open3"
 require "json"
 
+ENV["LANG"] ||= "en_US.UTF-8"
+ENV["LANGUAGE"] ||= "en_US.UTF-8"
+ENV["LC_ALL"] ||= "en_US.UTF-8"
+
 default_platform(:ios)
 
 BETA_APP_IDENTIFIER = "ai.openclaw.client"
+
+def resolve_beta_app_identifier
+  override = ENV["ASC_APP_IDENTIFIER"]
+  return override if env_present?(override)
+
+  local_signing = File.join(ios_root, ".local-signing.xcconfig")
+  if File.exist?(local_signing)
+    File.foreach(local_signing) do |line|
+      match = line.match(/^\s*OPENCLAW_APP_BUNDLE_ID\s*=\s*(.+?)\s*$/)
+      return match[1].strip if match && env_present?(match[1])
+    end
+  end
+
+  BETA_APP_IDENTIFIER
+end
 
 def load_env_file(path)
   return unless File.exist?(path)
@@ -156,9 +175,12 @@ def resolve_beta_build_number(api_key:, short_version:)
     return explicit
   end
 
+  app_identifier = resolve_beta_app_identifier
+  UI.message("Using App Store Connect app identifier #{app_identifier} for beta build lookup.")
+
   latest_build = latest_testflight_build_number(
     api_key: api_key,
-    app_identifier: BETA_APP_IDENTIFIER,
+    app_identifier: app_identifier,
     version: short_version,
     initial_build_number: 0
   )
@@ -202,6 +224,7 @@ def build_beta_release(context)
     output_name: "OpenClaw-#{version}.ipa",
     xcargs: "-allowProvisioningUpdates",
     export_xcargs: "-allowProvisioningUpdates",
+    xcodebuild_formatter: "",
     export_options: {
       signingStyle: "automatic"
     }
