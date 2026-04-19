@@ -87,6 +87,11 @@ final class TalkModeManager: NSObject {
     private var apiKey: String?
     private var voiceAliases: [String: String] = [:]
     private var interruptOnSpeech: Bool = true
+    /// Parsed generic provider surface. Non-nil whenever the gateway served a
+    /// resolved talk config; used to route OpenAI / Azure-OpenAI TTS without
+    /// branching on provider id across the call sites.
+    private var providerSurface: TalkProviderSurface?
+    private var openAIRuntime = TalkOpenAICompatibleTTSRuntime()
     private var mainSessionKey: String = "main"
     private var fallbackVoiceId: String?
     private var lastPlaybackWasPCM: Bool = false
@@ -1023,6 +1028,50 @@ final class TalkModeManager: NSObject {
             }
             let canUseElevenLabs = (voiceId?.isEmpty == false) && (apiKey?.isEmpty == false)
 
+            // Route OpenAI / Azure-OpenAI ahead of the ElevenLabs branch. When the
+            // provider surface maps to an OpenAI-compatible provider, we use the
+            // generic TTS runtime. Any failure here falls through to system voice
+            // rather than to the ElevenLabs path (which would fail without a key).
+            if let openAIConfig = self.resolveOpenAICompatibleTTSConfig(directive: directive) {
+                GatewayDiagnostics.log(
+                    "talk tts: provider=\(openAIConfig.kind.rawValue) voice=\(openAIConfig.voice) model=\(openAIConfig.model)")
+                if self.interruptOnSpeech {
+                    do { try self.startRecognition() } catch {
+                        self.logger.warning(
+                            "startRecognition during speak failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                self.statusText = "Speaking…"
+                self.lastPlaybackWasPCM = (openAIConfig.responseFormat == .pcm)
+                do {
+                    let result = try await self.openAIRuntime.speak(text: cleaned, config: openAIConfig)
+                    let duration = Date().timeIntervalSince(started)
+                    self.logger
+                        .info("openai-tts stream finished=\(result.finished, privacy: .public) dur=\(duration, privacy: .public)s")
+                    if !result.finished, let interruptedAt = result.interruptedAt {
+                        self.lastInterruptedAtSeconds = interruptedAt
+                    }
+                    self.stopRecognition()
+                    self.isSpeaking = false
+                    return
+                } catch {
+                    self.logger.error(
+                        "openai-tts failed: \(error.localizedDescription, privacy: .public); falling back to system voice")
+                    GatewayDiagnostics.log(
+                        "talk tts: provider=\(openAIConfig.kind.rawValue) error msg=\(error.localizedDescription)")
+                    // Fall through to system-voice path below.
+                    self.statusText = "Speaking (System)…"
+                    do {
+                        try await TalkSystemSpeechSynthesizer.shared.speak(text: cleaned, language: language)
+                    } catch {
+                        self.statusText = "Speak failed: \(error.localizedDescription)"
+                    }
+                    self.stopRecognition()
+                    self.isSpeaking = false
+                    return
+                }
+            }
+
             if canUseElevenLabs, let voiceId, let apiKey {
                 GatewayDiagnostics.log("talk tts: provider=elevenlabs voiceId=\(voiceId)")
                 let desiredOutputFormat = (directive?.outputFormat ?? self.defaultOutputFormat)?
@@ -1497,6 +1546,20 @@ final class TalkModeManager: NSObject {
     }
 
     private func buildIncrementalSpeechContext(directive: TalkDirective?) async -> IncrementalSpeechContext {
+        // When the configured provider is not ElevenLabs, skip the `listVoices`
+        // resolution entirely. The incremental speak path checks for an OpenAI-compatible
+        // surface before using this context, so returning `canUseElevenLabs=false` is
+        // safe and keeps the code below provider-scoped to ElevenLabs.
+        if let providerKind = self.providerSurface?.kind, providerKind != .elevenlabs {
+            return IncrementalSpeechContext(
+                apiKey: nil,
+                voiceId: nil,
+                modelId: directive?.modelId ?? self.currentModelId ?? self.defaultModelId,
+                outputFormat: nil,
+                language: self.incrementalSpeechLanguage,
+                directive: directive,
+                canUseElevenLabs: false)
+        }
         let requestedVoice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedVoice = self.resolveVoiceAlias(requestedVoice)
         if requestedVoice?.isEmpty == false, resolvedVoice == nil {
@@ -1615,6 +1678,28 @@ final class TalkModeManager: NSObject {
         prefetchedAudio: IncrementalPrefetchedAudio? = nil
     ) async
     {
+        // OpenAI / Azure-OpenAI incremental path. Skip the ElevenLabs-specific
+        // pre-fetch machinery and call the generic runtime segment-by-segment. This
+        // is slightly less optimal than ElevenLabs today but keeps the provider layer
+        // generic and well below the ~200 ms per-segment user-visible latency.
+        if let openAIConfig = self.resolveOpenAICompatibleTTSConfig(directive: nil) {
+            self.statusText = "Speaking…"
+            self.lastPlaybackWasPCM = (openAIConfig.responseFormat == .pcm)
+            do {
+                let result = try await self.openAIRuntime.speak(text: text, config: openAIConfig)
+                if !result.finished, let interruptedAt = result.interruptedAt {
+                    self.lastInterruptedAtSeconds = interruptedAt
+                }
+            } catch {
+                self.logger.error(
+                    "openai-tts incremental failed: \(error.localizedDescription, privacy: .public)")
+                try? await TalkSystemSpeechSynthesizer.shared.speak(
+                    text: text,
+                    language: self.incrementalSpeechLanguage)
+            }
+            return
+        }
+
         let context: IncrementalSpeechContext
         if let preferredContext {
             context = preferredContext
@@ -2011,7 +2096,29 @@ extension TalkModeManager {
             } else {
                 self.apiKey = (localApiKey?.isEmpty == false) ? localApiKey : configApiKey
             }
-            if activeProvider != Self.defaultTalkProvider {
+            // Store the generic provider surface so the TTS path can route openai /
+            // azure-openai without a provider-id switch at each call site. For
+            // ElevenLabs, the existing `apiKey`/voice state is already the source of
+            // truth and the surface is consulted only to confirm the provider kind.
+            self.providerSurface = parsed.providerSurface
+            let providerKind = parsed.providerSurface?.kind
+            let supportsOpenAICompatible = (providerKind == .openai || providerKind == .azureOpenai)
+            if providerKind == nil, activeProvider != Self.defaultTalkProvider {
+                // Unknown provider id: fall back to system voice.
+                self.apiKey = nil
+                GatewayDiagnostics.log(
+                    "talk provider '\(activeProvider)' not recognized on iOS; using system voice fallback")
+            } else if supportsOpenAICompatible {
+                // Merge local keychain override with the surface so the generic TTS
+                // runtime sees the same secret the ElevenLabs path would.
+                if let localApiKey, !localApiKey.isEmpty, self.providerSurface?.apiKey == nil {
+                    self.providerSurface = self.withOverriddenApiKey(
+                        surface: self.providerSurface,
+                        apiKey: localApiKey)
+                }
+                GatewayDiagnostics.log(
+                    "talk provider '\(activeProvider)' uses OpenAI-compatible iOS TTS")
+            } else if providerKind != .elevenlabs, activeProvider != Self.defaultTalkProvider {
                 self.apiKey = nil
                 GatewayDiagnostics.log(
                     "talk provider '\(activeProvider)' not yet supported on iOS; using system voice fallback")
@@ -2038,7 +2145,70 @@ extension TalkModeManager {
             self.gatewayTalkApiKeyConfigured = false
             self.gatewayTalkConfigLoaded = false
             self.silenceWindow = TimeInterval(Self.defaultSilenceTimeoutMs) / 1000
+            self.providerSurface = nil
         }
+    }
+
+    /// Return a new surface copy with `apiKey` replaced. We cannot mutate the struct in
+    /// place because iOS keychain-backed local overrides arrive after the config
+    /// payload has already been normalized.
+    private func withOverriddenApiKey(
+        surface: TalkProviderSurface?,
+        apiKey: String
+    ) -> TalkProviderSurface? {
+        guard let surface else { return nil }
+        return TalkProviderSurface(
+            kind: surface.kind,
+            rawKindString: surface.rawKindString,
+            apiKey: apiKey,
+            apiKeyRedacted: false,
+            baseUrl: surface.baseUrl,
+            model: surface.model,
+            voice: surface.voice,
+            responseFormat: surface.responseFormat,
+            instructions: surface.instructions,
+            speed: surface.speed,
+            azureEndpoint: surface.azureEndpoint,
+            azureApiVersion: surface.azureApiVersion,
+            transcribeModel: surface.transcribeModel,
+            transcribeLanguage: surface.transcribeLanguage,
+            useServerTranscribe: surface.useServerTranscribe,
+            realtimeModel: surface.realtimeModel,
+            realtimeVoice: surface.realtimeVoice,
+            realtimeApiVersion: surface.realtimeApiVersion)
+    }
+
+    /// Resolve the TTS capability config for the currently loaded provider surface.
+    /// Returns `nil` unless the surface maps to an OpenAI-compatible provider with
+    /// credentials that can actually hit the endpoint (e.g. Azure with an endpoint).
+    func resolveOpenAICompatibleTTSConfig(directive: TalkDirective?) -> TTSCapabilityConfig? {
+        guard var config = self.providerSurface?.makeOpenAITTSConfig() else { return nil }
+        // Directive overrides: voice + model + speed + format. `instructions` isn't
+        // exposed via the TalkDirective schema; we stay with the provider default.
+        let voice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = directive?.modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speed = directive?.speed
+        let formatRaw = directive?.outputFormat?.lowercased()
+        var responseFormat = config.responseFormat
+        if let formatRaw {
+            switch formatRaw {
+            case "mp3": responseFormat = .mp3
+            case "opus": responseFormat = .opus
+            case "wav": responseFormat = .wav
+            case "pcm", "pcm_24000", "pcm_16000", "pcm24000": responseFormat = .pcm
+            default: break
+            }
+        }
+        config = TTSCapabilityConfig(
+            kind: config.kind,
+            credentials: config.credentials,
+            model: (model?.isEmpty == false) ? model! : config.model,
+            voice: (voice?.isEmpty == false) ? voice! : config.voice,
+            responseFormat: responseFormat,
+            instructions: config.instructions,
+            speed: speed ?? config.speed,
+            baseUrl: config.baseUrl)
+        return config
     }
 
     static func configureAudioSession() throws {

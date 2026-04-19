@@ -12,6 +12,9 @@ struct TalkModeGatewayConfigState {
     let rawConfigApiKey: String?
     let interruptOnSpeech: Bool?
     let silenceTimeoutMs: Int
+    /// Generic per-provider surface. `nil` when the gateway did not send a
+    /// resolved payload (the caller then treats config as unloaded).
+    let providerSurface: TalkProviderSurface?
 }
 
 enum TalkModeGatewayConfigParser {
@@ -54,6 +57,15 @@ enum TalkModeGatewayConfigParser {
             talk,
             fallback: defaultSilenceTimeoutMs)
 
+        let providerSurface: TalkProviderSurface?
+        if let selection {
+            providerSurface = TalkProviderSurfaceParser.parse(
+                rawProviderId: selection.provider,
+                config: selection.config)
+        } else {
+            providerSurface = nil
+        }
+
         return TalkModeGatewayConfigState(
             activeProvider: activeProvider,
             normalizedPayload: selection?.normalizedPayload == true,
@@ -64,6 +76,7 @@ enum TalkModeGatewayConfigParser {
             defaultOutputFormat: defaultOutputFormat,
             rawConfigApiKey: rawConfigApiKey,
             interruptOnSpeech: interruptOnSpeech,
-            silenceTimeoutMs: silenceTimeoutMs)
+            silenceTimeoutMs: silenceTimeoutMs,
+            providerSurface: providerSurface)
     }
 }
