@@ -172,6 +172,19 @@ public actor OpenAIRealtimeVoiceSession {
         try await self.sendJSON(payload)
     }
 
+    /// Cancel the in-flight assistant response so the client can start playing the
+    /// user's next turn immediately. Used for barge-in: when the microphone detects
+    /// the user speaking while the assistant audio is still streaming, we tear down
+    /// the current response over the WS so the server stops generating more audio.
+    /// Keeps the session open — server_vad will create the next response on its own
+    /// once the next user utterance ends.
+    public func cancelActiveResponse() async throws {
+        let payload = Self.encodeJSON([
+            "type": "response.cancel",
+        ])
+        try await self.sendJSON(payload)
+    }
+
     public func close() async {
         guard !self.isClosed else { return }
         self.isClosed = true

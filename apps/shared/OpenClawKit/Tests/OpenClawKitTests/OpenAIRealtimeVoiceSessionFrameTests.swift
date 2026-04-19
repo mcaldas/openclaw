@@ -190,6 +190,21 @@ private func testConfig(
         #expect(finals == ["hello"])
     }
 
+    @Test func cancelActiveResponseEmitsResponseCancelFrame() async throws {
+        let stub = StubRealtimeWebSocket()
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub })
+        try await session.connect()
+        try await session.cancelActiveResponse()
+        let frames = await stub.sentFrames()
+        // First frame is `session.update`; second is the cancel frame.
+        #expect(frames.count >= 2)
+        let cancelFrame = frames[1]
+        #expect(cancelFrame.contains("\"type\":\"response.cancel\""))
+        await session.close()
+    }
+
     @Test func fallbackActivatedWhenPrimaryFailsWithAbnormalClose() async {
         let dialLog = DialLog()
         let factory: RealtimeWebSocketFactory = { deployment in

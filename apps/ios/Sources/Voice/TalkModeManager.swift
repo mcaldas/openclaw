@@ -101,6 +101,22 @@ final class TalkModeManager: NSObject {
     var pcmPlayer: PCMStreamingAudioPlaying = PCMStreamingAudioPlayer.shared
     var mp3Player: StreamingAudioPlaying = StreamingAudioPlayer.shared
 
+    // Realtime splice state. All fields are `@MainActor`-confined because they
+    // are only touched from `TalkModeManager`'s main-actor-owned methods. Kept
+    // private so the Tier 1 code paths remain the default surface area.
+    private let talkRealtimeRuntime = TalkRealtimeSessionRuntime()
+    private var realtimeActive = false
+    private var realtimeDegraded = false
+    private var realtimeResampler: RealtimeAudioResampler?
+    /// Continuation used to push PCM16 24 kHz audio chunks received from the
+    /// realtime session into `pcmPlayer`. Nil until the first assistant audio
+    /// chunk arrives; torn down on session close or on barge-in.
+    private var realtimeAudioFeed: AsyncThrowingStream<Data, Error>.Continuation?
+    private var realtimePlaybackTask: Task<Void, Never>?
+    /// Test hook: when non-nil, `start()` skips the real network dial and uses
+    /// this factory to produce a scripted `RealtimeWebSocket`.
+    var realtimeWebSocketFactoryOverride: RealtimeWebSocketFactory?
+
     private var gateway: GatewayNodeSession?
     private var gatewayConnected = false
     private var silenceWindow: TimeInterval = TimeInterval(TalkModeManager.defaultSilenceTimeoutMs) / 1000
@@ -195,6 +211,38 @@ final class TalkModeManager: NSObject {
         }
 
         await self.reloadConfig()
+        // Realtime splice: when the gateway's provider surface opts in and the
+        // capability config resolves cleanly, run the full duplex realtime loop
+        // instead of the Tier 1 SFSpeechRecognizer + HTTP TTS path. A transient
+        // failure flips `realtimeDegraded` so we don't dial into a dead loop —
+        // the Tier 1 path takes over for the remainder of this Talk Mode entry.
+        if !self.realtimeDegraded,
+           self.isRealtimeEnabled,
+           let realtimeConfig = self.resolveRealtimeCapabilityConfig(directive: nil)
+        {
+            do {
+                try Self.configureAudioSession()
+                self.captureMode = .continuous
+                try await self.startRealtimeRecognition(config: realtimeConfig)
+                self.isListening = true
+                self.realtimeActive = true
+                self.statusText = "Listening"
+                self.startSilenceMonitor()
+                await self.subscribeChatIfNeeded(sessionKey: self.mainSessionKey)
+                self.logger.info("listening (realtime)")
+                GatewayDiagnostics.log("talk realtime: session started model=\(realtimeConfig.model)")
+                return
+            } catch {
+                self.realtimeDegraded = true
+                GatewayDiagnostics.log(
+                    "talk realtime: start failed error=\(error.localizedDescription); degrading to tier 1")
+                self.logger.error(
+                    "realtime start failed: \(error.localizedDescription, privacy: .public); degrading")
+                await self.tearDownRealtimeSession()
+                // Fall through into the Tier 1 startup below.
+            }
+        }
+
         do {
             try Self.configureAudioSession()
             // Set this before starting recognition so any early speech errors are classified correctly.
@@ -222,6 +270,12 @@ final class TalkModeManager: NSObject {
         self.lastHeard = nil
         self.silenceTask?.cancel()
         self.silenceTask = nil
+        // Reset the degrade flag so a subsequent enable re-enters realtime when
+        // the feature flag + config still say so.
+        self.realtimeDegraded = false
+        Task { @MainActor [weak self] in
+            await self?.tearDownRealtimeSession()
+        }
         self.stopRecognition()
         self.stopSpeaking()
         self.lastInterruptedAtSeconds = nil
@@ -267,6 +321,12 @@ final class TalkModeManager: NSObject {
         self.silenceTask?.cancel()
         self.silenceTask = nil
 
+        // Background = tear down the realtime socket so we don't hold a stale
+        // connection. Suspended Talk Mode state (`isEnabled`) stays untouched, so
+        // `resumeAfterBackground()` can dial again.
+        Task { @MainActor [weak self] in
+            await self?.tearDownRealtimeSession()
+        }
         self.stopRecognition()
         self.stopSpeaking()
         self.lastInterruptedAtSeconds = nil
@@ -663,6 +723,341 @@ final class TalkModeManager: NSObject {
         }
         self.audioEngine.stop()
         self.speechRecognizer = nil
+    }
+
+    // MARK: - Realtime splice.
+    //
+    // The realtime path replaces the SFSpeechRecognizer + HTTP TTS flow with a
+    // single bidirectional WebSocket session. Microphone buffers are resampled to
+    // 24 kHz PCM16 and streamed out as `input_audio_buffer.append`; assistant
+    // audio deltas come back over the same socket and are pushed into the
+    // existing `PCMStreamingAudioPlayer` bus (same player the Tier 1 TTS path
+    // uses, so we don't double up output).
+    //
+    // Invariant: everything provider-specific (OpenAI vs Azure) already lives in
+    // `VoiceProviderEndpoints.swift` via the factory; this splice never branches
+    // on provider kind.
+
+    /// Bring up the realtime mic pipeline. On success the mic tap is live and the
+    /// runtime is connected to the chosen deployment; on failure we throw so the
+    /// caller can fall back to the Tier 1 path.
+    private func startRealtimeRecognition(config: RealtimeCapabilityConfig) async throws {
+        // Tear any stale Tier 1 recognizer state down so the mic tap we install
+        // below owns bus 0 exclusively. Safe to call when idle.
+        self.stopRecognition()
+
+        GatewayDiagnostics.log("talk audio: session \(Self.describeAudioSession())")
+
+        #if targetEnvironment(simulator)
+            // The simulator cannot reliably tap the mic for live realtime audio,
+            // but the session actor + connect logic still need to be exercised in
+            // test builds. Skip the mic install and let the runtime connect; tests
+            // drive audio through `_test_` helpers below.
+            if !self.allowSimulatorCapture {
+                throw NSError(domain: "TalkMode", code: 8, userInfo: [
+                    NSLocalizedDescriptionKey: "Realtime mic capture is not supported on the iOS simulator",
+                ])
+            }
+        #else
+            try self.installRealtimeMicTap()
+        #endif
+
+        let runtime = self.talkRealtimeRuntime
+        runtime.delegate = self.makeRealtimeDelegate()
+        do {
+            try await runtime.start(
+                config: config,
+                factoryOverride: self.realtimeWebSocketFactoryOverride)
+        } catch {
+            self.teardownRealtimeMicTap()
+            throw error
+        }
+    }
+
+    /// Install the realtime mic tap. Reuses `AudioTapDiagnostics` so the UI level
+    /// meter and barge-in threshold stay consistent with Tier 1. The tap block
+    /// is `nonisolated` (runs on an AVAudioEngine-owned queue), so it hops back to
+    /// `MainActor` for every resampled frame send.
+    private func installRealtimeMicTap() throws {
+        let input = self.audioEngine.inputNode
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "TalkMode", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid audio input format",
+            ])
+        }
+        input.removeTap(onBus: 0)
+        let resampler = RealtimeAudioResampler()
+        self.realtimeResampler = resampler
+        let tapDiagnostics = self.makeMicVADDiagnostics()
+        self.audioTapDiagnostics = tapDiagnostics
+        let runtime = self.talkRealtimeRuntime
+        let tapBlock = Self.makeRealtimeAudioTapCallback(
+            resampler: resampler,
+            diagnostics: tapDiagnostics) { [weak runtime] frames in
+            // Hop to the main actor to feed the runtime. The frame list is small
+            // (0–2 frames per tap given 40ms frames + ~80ms tap buffer), so we
+            // avoid per-frame Task churn here.
+            guard let runtime else { return }
+            Task { @MainActor in
+                for frame in frames {
+                    try? await runtime.sendAudio(pcm16: frame)
+                }
+            }
+        }
+        input.installTap(onBus: 0, bufferSize: 2048, format: format, block: tapBlock)
+        self.inputTapInstalled = true
+        self.audioEngine.prepare()
+        try self.audioEngine.start()
+    }
+
+    /// Factored so unit tests can assert the resampler <-> runtime edge without
+    /// touching AVAudioEngine. Returns a tap block that, for every PCM buffer:
+    ///   1. Runs the existing VAD diagnostics (level smoothing, noise floor).
+    ///   2. Resamples to 24 kHz PCM16 and forwards complete 40 ms frames to
+    ///      `onFrames` (a callback the caller wires to the runtime).
+    nonisolated static func makeRealtimeAudioTapCallback(
+        resampler: RealtimeAudioResampler,
+        diagnostics: AudioTapDiagnostics,
+        onFrames: @escaping @Sendable ([Data]) -> Void
+    ) -> AVAudioNodeTapBlock {
+        { buffer, _ in
+            diagnostics.onBuffer(buffer)
+            guard let data = buffer.floatChannelData?.pointee else { return }
+            let n = Int(buffer.frameLength)
+            guard n > 0 else { return }
+            var samples = [Float](repeating: 0, count: n)
+            for i in 0..<n {
+                samples[i] = data[i]
+            }
+            let frames = resampler.append(
+                floatSamples: samples,
+                sourceSampleRate: buffer.format.sampleRate)
+            if !frames.isEmpty {
+                onFrames(frames)
+            }
+        }
+    }
+
+    /// Create the VAD/level-meter diagnostics bound to the current instance. The
+    /// callback also powers barge-in: when the user's mic exceeds the threshold
+    /// while realtime playback is active, we interrupt the response.
+    private func makeMicVADDiagnostics() -> AudioTapDiagnostics {
+        AudioTapDiagnostics(label: "talk-realtime") { [weak self] level in
+            guard let self else { return }
+            Task { @MainActor in
+                let raw = max(0, min(Double(level) * 10.0, 1.0))
+                let next = (self.micLevel * 0.80) + (raw * 0.20)
+                self.micLevel = next
+
+                if self.realtimeActive, !self.isSpeaking, !self.noiseFloorReady {
+                    self.noiseFloorSamples.append(raw)
+                    if self.noiseFloorSamples.count >= 22 {
+                        let sorted = self.noiseFloorSamples.sorted()
+                        let take = max(6, sorted.count / 2)
+                        let slice = sorted.prefix(take)
+                        let avg = slice.reduce(0.0, +) / Double(slice.count)
+                        self.noiseFloor = avg
+                        self.noiseFloorReady = true
+                        self.noiseFloorSamples.removeAll(keepingCapacity: true)
+                    }
+                }
+
+                let threshold: Double = if let floor = self.noiseFloor, self.noiseFloorReady {
+                    min(0.35, max(0.12, floor + 0.10))
+                } else {
+                    0.18
+                }
+                if raw >= threshold {
+                    self.lastAudioActivity = Date()
+                    // Barge-in: if the assistant is speaking back through the PCM
+                    // bus, cut playback and cancel the in-flight response over the
+                    // WS so the server stops generating more audio.
+                    if self.isSpeaking,
+                       self.interruptOnSpeech,
+                       self.shouldAllowSpeechInterruptForCurrentRoute()
+                    {
+                        await self.handleRealtimeBargeIn()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the delegate forwarded to `TalkRealtimeSessionRuntime`. The delegate
+    /// stitches together transcript updates, assistant audio playback, fallback
+    /// logging, and graceful degrade to Tier 1 on unrecoverable errors.
+    private func makeRealtimeDelegate() -> TalkRealtimeSessionRuntime.Delegate {
+        var delegate = TalkRealtimeSessionRuntime.Delegate()
+        delegate.onConnected = { [weak self] deployment in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.info("realtime connected deployment=\(deployment, privacy: .public)")
+                GatewayDiagnostics.log("talk realtime: connected deployment=\(deployment)")
+            }
+        }
+        delegate.onFinalTranscript = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                self.lastTranscript = trimmed
+                self.lastHeard = Date()
+                GatewayDiagnostics.log("talk realtime: final transcript chars=\(trimmed.count)")
+            }
+        }
+        delegate.onAssistantTextDelta = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard !text.isEmpty else { return }
+                // Mirror Tier 1's lightweight transcript presentation: keep the
+                // last-spoken text updated so `stopSpeaking()` has something to
+                // compare against for barge-in suppression. Full chat surface
+                // mirroring lives on the server event stream and arrives via the
+                // same history fetch used by Tier 1.
+                let appended = (self.lastSpokenText ?? "") + text
+                self.lastSpokenText = appended
+            }
+        }
+        delegate.onAssistantAudioChunk = { [weak self] pcm16 in
+            Task { @MainActor [weak self] in
+                self?.enqueueRealtimeAssistantAudio(pcm16: pcm16)
+            }
+        }
+        delegate.onFallbackActivated = { [weak self] from, to, reason in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.warning(
+                    "realtime fallback from=\(from, privacy: .public) to=\(to, privacy: .public) reason=\(reason.rawValue, privacy: .public)")
+                GatewayDiagnostics.log(
+                    "talk realtime: fallback from=\(from) to=\(to) reason=\(reason.rawValue)")
+            }
+        }
+        delegate.onReconnectScheduled = { [weak self] attempt, delayMs in
+            Task { @MainActor [weak self] in
+                self?.logger.info("realtime reconnect attempt=\(attempt) delayMs=\(delayMs)")
+                GatewayDiagnostics.log(
+                    "talk realtime: reconnect scheduled attempt=\(attempt) delayMs=\(delayMs)")
+            }
+        }
+        delegate.onError = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.error("realtime error: \(error.message, privacy: .public)")
+                GatewayDiagnostics.log("talk realtime: error msg=\(error.message)")
+                // Unrecoverable error: flip degrade, close the session, and let
+                // the next `start()` fall through to the Tier 1 path.
+                self.realtimeDegraded = true
+                await self.tearDownRealtimeSession()
+                if self.isEnabled {
+                    await self.start()
+                }
+            }
+        }
+        delegate.onClosed = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.info("realtime closed")
+                GatewayDiagnostics.log("talk realtime: closed")
+                // Clean close from the peer — finish any buffered playback and
+                // leave `realtimeDegraded` alone; user can reopen Talk Mode.
+                self.realtimeAudioFeed?.finish()
+                self.realtimeAudioFeed = nil
+            }
+        }
+        return delegate
+    }
+
+    /// Push a PCM16 24 kHz chunk into the playback feeder, lazily starting the
+    /// playback task on the first chunk.
+    private func enqueueRealtimeAssistantAudio(pcm16: Data) {
+        guard !pcm16.isEmpty else { return }
+        if self.realtimeAudioFeed == nil {
+            self.startRealtimePlaybackFeed()
+        }
+        self.realtimeAudioFeed?.yield(pcm16)
+    }
+
+    /// Start a single long-lived playback task that drains PCM chunks from the
+    /// realtime session into `pcmPlayer`. Using one task per session keeps the
+    /// `PCMStreamingAudioPlayer` queue stable across multiple assistant turns —
+    /// otherwise each `play(stream:)` call would race the next chunk arriving.
+    private func startRealtimePlaybackFeed() {
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            self.realtimeAudioFeed = continuation
+        }
+        let player = self.pcmPlayer
+        self.lastPlaybackWasPCM = true
+        self.isSpeaking = true
+        self.statusText = "Speaking…"
+        self.realtimePlaybackTask = Task { @MainActor [weak self] in
+            let result = await player.play(
+                stream: stream,
+                sampleRate: RealtimeAudioResampler.Constants.targetSampleRate)
+            guard let self else { return }
+            if !result.finished, let interruptedAt = result.interruptedAt {
+                self.lastInterruptedAtSeconds = interruptedAt
+            }
+            self.isSpeaking = false
+            self.realtimePlaybackTask = nil
+            self.realtimeAudioFeed = nil
+            if self.realtimeActive, self.isEnabled {
+                self.statusText = "Listening"
+            }
+        }
+    }
+
+    /// Barge-in: stop playback immediately, tell the server to cancel the
+    /// in-flight response, and reset for the next user utterance.
+    private func handleRealtimeBargeIn() async {
+        // Stop any buffered PCM playback first so we don't continue speaking over
+        // the user even if the WS cancel takes a moment to round-trip.
+        _ = self.pcmPlayer.stop()
+        self.realtimeAudioFeed?.finish()
+        self.realtimeAudioFeed = nil
+        self.realtimePlaybackTask?.cancel()
+        self.realtimePlaybackTask = nil
+        self.isSpeaking = false
+        self.lastInterruptedAtSeconds = Date().timeIntervalSince1970
+        do {
+            try await self.talkRealtimeRuntime.cancelActiveResponse()
+            GatewayDiagnostics.log("talk realtime: barge-in cancelled active response")
+        } catch {
+            self.logger.warning(
+                "realtime cancel failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Tear down everything owned by the realtime splice. Idempotent.
+    private func tearDownRealtimeSession() async {
+        self.realtimeAudioFeed?.finish()
+        self.realtimeAudioFeed = nil
+        self.realtimePlaybackTask?.cancel()
+        self.realtimePlaybackTask = nil
+        _ = self.pcmPlayer.stop()
+        self.teardownRealtimeMicTap()
+        await self.talkRealtimeRuntime.close()
+        self.realtimeActive = false
+    }
+
+    /// Remove the mic tap and stop the engine if we installed it for realtime.
+    /// Mirrors the Tier 1 `stopRecognition()` mic teardown but without touching
+    /// SFSpeechRecognizer state (which the realtime path never wires up).
+    private func teardownRealtimeMicTap() {
+        self.realtimeResampler?.reset()
+        self.realtimeResampler = nil
+        self.audioTapDiagnostics = nil
+        if self.inputTapInstalled {
+            self.audioEngine.inputNode.removeTap(onBus: 0)
+            self.inputTapInstalled = false
+        }
+        if self.audioEngine.isRunning {
+            self.audioEngine.stop()
+        }
+        self.micLevel = 0
+        self.noiseFloorSamples.removeAll(keepingCapacity: true)
+        self.noiseFloor = nil
+        self.noiseFloorReady = false
     }
 
     private nonisolated static func makeAudioTapAppendCallback(
@@ -2295,7 +2690,7 @@ extension TalkModeManager {
     }
 }
 
-private final class AudioTapDiagnostics: @unchecked Sendable {
+final class AudioTapDiagnostics: @unchecked Sendable {
     private let label: String
     private let onLevel: (@Sendable (Float) -> Void)?
     private let lock = NSLock()
@@ -2395,6 +2790,39 @@ extension TalkModeManager {
     func _test_incrementalIngest(_ text: String, isFinal: Bool) -> [String] {
         self.incrementalSpeechBuffer.ingest(text: text, isFinal: isFinal)
     }
+
+    /// Drive the realtime startup without requiring gateway/mic/permissions. The
+    /// mic tap install is skipped on the simulator path; the runtime connect uses
+    /// whatever `realtimeWebSocketFactoryOverride` is configured.
+    func _test_startRealtime(config: RealtimeCapabilityConfig) async throws {
+        self.captureMode = .continuous
+        try await self.startRealtimeRecognition(config: config)
+        self.isListening = true
+        self.realtimeActive = true
+    }
+
+    /// Inject a PCM16 chunk as if the realtime session had emitted it. Exercises
+    /// the playback feeder without touching AVAudioEngine.
+    func _test_enqueueAssistantAudio(pcm16: Data) {
+        self.enqueueRealtimeAssistantAudio(pcm16: pcm16)
+    }
+
+    /// Tear down state the way `stop()` would. Exposed so lifecycle tests can
+    /// assert idempotency without going through the full `stop()` side-effects
+    /// (which touch AVAudioSession).
+    func _test_tearDownRealtime() async {
+        await self.tearDownRealtimeSession()
+    }
+
+    /// Observability hook for the lifecycle tests.
+    var _test_realtimeActive: Bool { self.realtimeActive }
+
+    /// Whether the runtime currently owns a connected session.
+    var _test_runtimeIsActive: Bool { self.talkRealtimeRuntime.isActive }
+
+    /// Returns the shared runtime so tests can wire their own delegate/factory if
+    /// they need to.
+    var _test_realtimeRuntime: TalkRealtimeSessionRuntime { self.talkRealtimeRuntime }
 }
 #endif
 

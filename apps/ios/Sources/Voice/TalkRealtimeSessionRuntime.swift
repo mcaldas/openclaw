@@ -50,15 +50,21 @@ final class TalkRealtimeSessionRuntime {
     /// Start a realtime session with `config`. Returns after the initial connect
     /// (including fallback selection) finishes. Caller is expected to keep the
     /// runtime alive until `close()` is invoked.
+    ///
+    /// `factoryOverride` lets tests inject a scripted `RealtimeWebSocket` stub so
+    /// the splice can be exercised without opening a real socket.
     func start(
         config: RealtimeCapabilityConfig,
-        policy: RealtimeReconnectPolicy = .default
+        policy: RealtimeReconnectPolicy = .default,
+        factoryOverride: RealtimeWebSocketFactory? = nil
     ) async throws {
         await self.stopIfActive()
+        let factory = factoryOverride
+            ?? OpenAIRealtimeVoiceSession.makeURLSessionFactory(config: config)
         let session = OpenAIRealtimeVoiceSession(
             config: config,
             policy: policy,
-            factory: OpenAIRealtimeVoiceSession.makeURLSessionFactory(config: config))
+            factory: factory)
         self.session = session
         let events = session.events
         self.eventConsumerTask = Task { [weak self] in
@@ -78,9 +84,21 @@ final class TalkRealtimeSessionRuntime {
         try await self.session?.sendAudio(pcm16: pcm16)
     }
 
+    /// Cancel the in-flight assistant response (barge-in). Safe to call when there
+    /// is no active response — the server simply ignores an out-of-band cancel.
+    func cancelActiveResponse() async throws {
+        try await self.session?.cancelActiveResponse()
+    }
+
     /// Close the session and drop all state.
     func close() async {
         await self.stopIfActive()
+    }
+
+    /// Whether a session is currently open. Lets the talk manager keep start/stop
+    /// idempotent without tracking its own flag.
+    var isActive: Bool {
+        self.session != nil
     }
 
     private func stopIfActive() async {
