@@ -92,6 +92,22 @@ public struct GatewayRealtimeTicket: Sendable, Equatable, Codable {
     public let wsPath: String
     public let expiresAtMs: Int64
     public let audio: GatewayRealtimeAudio
+
+    public init(
+        voiceRunId: String,
+        sessionKey: String,
+        ticket: String,
+        wsPath: String,
+        expiresAtMs: Int64,
+        audio: GatewayRealtimeAudio)
+    {
+        self.voiceRunId = voiceRunId
+        self.sessionKey = sessionKey
+        self.ticket = ticket
+        self.wsPath = wsPath
+        self.expiresAtMs = expiresAtMs
+        self.audio = audio
+    }
 }
 
 public enum GatewayRealtimeTransportError: Error, Sendable, Equatable {

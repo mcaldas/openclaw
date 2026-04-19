@@ -63,6 +63,11 @@ Sources/Voice/VoiceWakePreferences.swift
 ../../Swabble/Sources/SwabbleKit/WakeWordGate.swift
 Sources/Voice/TalkModeManager.swift
 Sources/Voice/TalkOrbOverlay.swift
+Sources/Voice/TalkRealtimeSessionRuntime.swift
+../shared/OpenClawKit/Sources/OpenClawKit/GatewayRealtimeTransport.swift
+../shared/OpenClawKit/Sources/OpenClawKit/RealtimeAudioResampler.swift
+../shared/OpenClawKit/Sources/OpenClawKit/RealtimeReconnectPolicy.swift
+../shared/OpenClawKit/Sources/OpenClawKit/RealtimeWebSocket.swift
 Sources/LiveActivity/OpenClawActivityAttributes.swift
 Sources/LiveActivity/LiveActivityManager.swift
 ActivityWidget/OpenClawActivityWidgetBundle.swift

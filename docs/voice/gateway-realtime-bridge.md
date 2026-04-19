@@ -463,9 +463,16 @@ next commit starts.
    tracking, approval-required verbal-nudge response, and error
    classification.
 5. iOS `GatewayRealtimeTransport` adapter + unit tests.
-6. iOS runtime switch: `TalkRealtimeSessionRuntime` re-targeted at the
-   gateway transport. Direct-to-Azure transport still present; feature flag
-   selects between them for bisecting during the cut.
+6. iOS runtime: `TalkRealtimeSessionRuntime` wraps
+   `GatewayRealtimeTransport` and publishes a delegate surface the UI
+   layer consumes. The 2200-LOC `TalkModeManager` integration (wiring
+   the runtime into the AVAudioEngine mic tap + `PCMStreamingAudioPlayer`
+   playback bus + orb state machine) is intentionally deferred to a
+   post-TestFlight validation step: we need the VM-deployed bridge to
+   be proven end-to-end before we rewrite the manager's state machine,
+   because a broken mic-tap splice is invisible without a real device
+   round-trip. The new runtime and its protocol round-trip are covered
+   by unit tests in this cut.
 7. Simulator smoke log + real-device verification plan update.
 8. TestFlight submission.
 9. (Post-TestFlight) Tier 2 retirement commit per "Tier 2 retirement"
