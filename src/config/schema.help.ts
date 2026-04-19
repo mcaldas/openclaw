@@ -148,6 +148,12 @@ export const FIELD_HELP: Record<string, string> = {
     "Provider-specific Talk settings keyed by provider id. During migration, prefer this over legacy talk.* keys.",
   "talk.providers.*": "Provider-owned Talk config fields for the matching provider id.",
   "talk.providers.*.apiKey": "Provider API key for Talk mode.", // pragma: allowlist secret
+  "talk.providers.*.realtimeBridge":
+    "Enable the gateway-proxied realtime voice bridge for this provider. When true, iOS connects to `/talk/realtime` on the gateway instead of dialing the provider directly. Keep disabled to fall back to the discrete STT+TTS (Tier 1) path. See docs/voice/gateway-realtime-bridge.md.",
+  "talk.providers.*.realtimeModel":
+    "Provider realtime model/deployment id used by the gateway bridge (for example `gpt-realtime-1-5` on Azure). Only read when `realtimeBridge` is true.",
+  "talk.providers.*.realtimeApiVersion":
+    "Provider realtime API version used by the gateway bridge (for example `2025-04-01-preview` for Azure OpenAI realtime). Only read when `realtimeBridge` is true.",
   "talk.interruptOnSpeech":
     "If true (default), stop assistant speech when the user starts speaking in Talk mode. Keep enabled for conversational turn-taking.",
   "talk.silenceTimeoutMs": `Milliseconds of user silence before Talk mode finalizes and sends the current transcript. Leave unset to keep the platform default pause window (${describeTalkSilenceTimeoutDefaults()}).`,

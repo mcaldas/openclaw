@@ -20680,6 +20680,24 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                   title: "Talk Provider API Key",
                   description: "Provider API key for Talk mode.",
                 },
+                realtimeBridge: {
+                  type: "boolean",
+                  title: "Talk Realtime Bridge",
+                  description:
+                    "Enable the gateway-proxied realtime voice bridge for this provider. When true, iOS connects to `/talk/realtime` on the gateway instead of dialing the provider directly. Keep disabled to fall back to the discrete STT+TTS (Tier 1) path. See docs/voice/gateway-realtime-bridge.md.",
+                },
+                realtimeModel: {
+                  type: "string",
+                  title: "Talk Realtime Model",
+                  description:
+                    "Provider realtime model/deployment id used by the gateway bridge (for example `gpt-realtime-1-5` on Azure). Only read when `realtimeBridge` is true.",
+                },
+                realtimeApiVersion: {
+                  type: "string",
+                  title: "Talk Realtime API Version",
+                  description:
+                    "Provider realtime API version used by the gateway bridge (for example `2025-04-01-preview` for Azure OpenAI realtime). Only read when `realtimeBridge` is true.",
+                },
               },
               additionalProperties: {},
               title: "Talk Provider Config",
@@ -26818,6 +26836,21 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Provider API key for Talk mode.",
       tags: ["security", "auth", "media"],
       sensitive: true,
+    },
+    "talk.providers.*.realtimeBridge": {
+      label: "Talk Realtime Bridge",
+      help: "Enable the gateway-proxied realtime voice bridge for this provider. When true, iOS connects to `/talk/realtime` on the gateway instead of dialing the provider directly. Keep disabled to fall back to the discrete STT+TTS (Tier 1) path. See docs/voice/gateway-realtime-bridge.md.",
+      tags: ["media"],
+    },
+    "talk.providers.*.realtimeModel": {
+      label: "Talk Realtime Model",
+      help: "Provider realtime model/deployment id used by the gateway bridge (for example `gpt-realtime-1-5` on Azure). Only read when `realtimeBridge` is true.",
+      tags: ["media"],
+    },
+    "talk.providers.*.realtimeApiVersion": {
+      label: "Talk Realtime API Version",
+      help: "Provider realtime API version used by the gateway bridge (for example `2025-04-01-preview` for Azure OpenAI realtime). Only read when `realtimeBridge` is true.",
+      tags: ["media"],
     },
     "channels.defaults": {
       label: "Channel Defaults",

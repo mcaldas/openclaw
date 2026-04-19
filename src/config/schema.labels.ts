@@ -793,6 +793,9 @@ export const FIELD_LABELS: Record<string, string> = {
   "talk.providers": "Talk Provider Settings",
   "talk.providers.*": "Talk Provider Config",
   "talk.providers.*.apiKey": "Talk Provider API Key", // pragma: allowlist secret
+  "talk.providers.*.realtimeBridge": "Talk Realtime Bridge",
+  "talk.providers.*.realtimeModel": "Talk Realtime Model",
+  "talk.providers.*.realtimeApiVersion": "Talk Realtime API Version",
   channels: "Channels",
   "channels.defaults": "Channel Defaults",
   "channels.defaults.groupPolicy": "Default Group Policy",

@@ -174,6 +174,14 @@ const PluginEntrySchema = z
 const TalkProviderEntrySchema = z
   .object({
     apiKey: SecretInputSchema.optional().register(sensitive),
+    // Gateway-proxied realtime voice bridge (docs/voice/gateway-realtime-bridge.md).
+    // When `realtimeBridge` is true, the gateway hosts the realtime WS at
+    // `/talk/realtime` and iOS connects through it instead of dialing the
+    // provider directly. The other `realtime*` fields configure that upstream
+    // connection. All are optional; the bridge defaults are safe when unset.
+    realtimeBridge: z.boolean().optional(),
+    realtimeModel: z.string().optional(),
+    realtimeApiVersion: z.string().optional(),
   })
   .catchall(z.unknown());
 
