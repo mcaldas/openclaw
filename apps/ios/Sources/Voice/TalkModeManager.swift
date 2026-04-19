@@ -2211,6 +2211,61 @@ extension TalkModeManager {
         return config
     }
 
+    /// Whether the currently loaded provider surface has realtime enabled. Opt-in
+    /// via `talk.<provider>.enableRealtime` (or nested `talk.<provider>.realtime.enabled`).
+    /// When false, the Tier 1 STT + TTS fallback path continues to own the voice
+    /// loop so existing deployments are unaffected.
+    var isRealtimeEnabled: Bool {
+        guard let surface = self.providerSurface else { return false }
+        return surface.enableRealtime && surface.makeRealtimeConfig() != nil
+    }
+
+    /// Resolve a `RealtimeCapabilityConfig` for the current provider surface, with
+    /// optional directive-level voice override. Returns nil when realtime is not
+    /// configured or the provider does not map to an OpenAI-compatible kind.
+    func resolveRealtimeCapabilityConfig(directive: TalkDirective?) -> RealtimeCapabilityConfig? {
+        guard let baseConfig = self.providerSurface?.makeRealtimeConfig() else { return nil }
+        let voice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let voice, !voice.isEmpty else { return baseConfig }
+        return RealtimeCapabilityConfig(
+            kind: baseConfig.kind,
+            credentials: baseConfig.credentials,
+            model: baseConfig.model,
+            voice: voice,
+            inputSampleRate: baseConfig.inputSampleRate,
+            outputSampleRate: baseConfig.outputSampleRate,
+            modelFallbacks: baseConfig.modelFallbacks)
+    }
+
+    #if DEBUG
+    /// Test-only hook that mirrors `resolveOpenAICompatibleTTSConfig`. Kept inside
+    /// the manager so callers can assert fallback/voice override behavior without
+    /// exposing the private `providerSurface`.
+    static func _test_resolveRealtimeCapabilityConfig(
+        surface: TalkProviderSurface?,
+        directive: TalkDirective?
+    ) -> RealtimeCapabilityConfig? {
+        guard let baseConfig = surface?.makeRealtimeConfig() else { return nil }
+        let voice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let voice, !voice.isEmpty else { return baseConfig }
+        return RealtimeCapabilityConfig(
+            kind: baseConfig.kind,
+            credentials: baseConfig.credentials,
+            model: baseConfig.model,
+            voice: voice,
+            inputSampleRate: baseConfig.inputSampleRate,
+            outputSampleRate: baseConfig.outputSampleRate,
+            modelFallbacks: baseConfig.modelFallbacks)
+    }
+
+    /// Test-only accessor for `isRealtimeEnabled` that takes a surface instead of
+    /// reading the instance's private state.
+    static func _test_isRealtimeEnabled(surface: TalkProviderSurface?) -> Bool {
+        guard let surface else { return false }
+        return surface.enableRealtime && surface.makeRealtimeConfig() != nil
+    }
+    #endif
+
     static func configureAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
         // Prefer `.spokenAudio` for STT; it tends to preserve speech energy better than `.voiceChat`.
