@@ -60,6 +60,15 @@ export {
 export { marshalAgentToolsForRealtime, type MarshalToolsResult } from "./tool-marshalling.js";
 
 export {
+  createToolDispatcher,
+  type CreateToolDispatcherOptions,
+  type ToolDispatchCallbacks,
+  type ToolDispatchEvent,
+  type ToolDispatchFinishedEvent,
+  type ToolDispatcher,
+} from "./tool-dispatch.js";
+
+export {
   formatSnapshotFromMessages,
   loadVoiceMemorySnapshot,
   type VoiceMemoryItem,

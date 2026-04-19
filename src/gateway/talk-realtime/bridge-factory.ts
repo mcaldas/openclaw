@@ -13,6 +13,7 @@ import type {
 } from "../../realtime-voice/provider-types.js";
 import { loadVoiceMemorySnapshot, type VoiceMemoryItem } from "./memory-snapshot.js";
 import { buildVoiceSystemPrompt } from "./session-prompt.js";
+import { createToolDispatcher } from "./tool-dispatch.js";
 import { marshalAgentToolsForRealtime } from "./tool-marshalling.js";
 import type { TalkRealtimeBridgeFactory } from "./upgrade-host.js";
 
@@ -132,8 +133,23 @@ export function createDefaultTalkRealtimeBridgeFactory(
           }
         }
       },
+      onToolCall: (toolCall) => {
+        dispatcher.dispatch(toolCall);
+      },
     };
     const bridge: RealtimeVoiceBridge = plugin.createBridge(createReq);
+    // Dispatcher is constructed after the bridge so it can post results
+    // via `bridge.submitToolResult`. The `onToolCall` callback closes
+    // over the `dispatcher` binding declared below; because
+    // `plugin.createBridge` returns synchronously before any upstream
+    // event can fire, the binding is live by the time any tool call is
+    // received.
+    const dispatcher = createToolDispatcher({
+      tools: agentTools,
+      bridge,
+      onStarted: (event) => sessionHandlersForBridge.onToolCallStarted?.(event),
+      onFinished: (event) => sessionHandlersForBridge.onToolCallFinished?.(event),
+    });
     return bridge;
   };
 }

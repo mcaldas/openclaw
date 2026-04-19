@@ -21,6 +21,22 @@ export type TalkRealtimeBridgeSessionHandlers = {
   onTranscript: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
   onError: (err: Error) => void;
   onClose: (reason: "completed" | "error") => void;
+  /**
+   * Fires when a realtime tool call begins executing. Routed to the
+   * client as `response.tool_call.started` so the iOS UI can render a
+   * progress indicator.
+   */
+  onToolCallStarted?: (event: { callId: string; name: string }) => void;
+  /**
+   * Fires when a realtime tool call finishes. Routed to the client as
+   * `response.tool_call.finished` with the measured duration.
+   */
+  onToolCallFinished?: (event: {
+    callId: string;
+    name: string;
+    durationMs: number;
+    ok: boolean;
+  }) => void;
 };
 
 /**
@@ -159,6 +175,22 @@ async function attachClientWs(
       },
       onClose: (reason) => {
         teardown(reason === "error" ? "bridge_error" : "session_ended");
+      },
+      onToolCallStarted: (event) => {
+        session?.sendServerEvent({
+          type: "response.tool_call.started",
+          callId: event.callId,
+          name: event.name,
+        });
+      },
+      onToolCallFinished: (event) => {
+        session?.sendServerEvent({
+          type: "response.tool_call.finished",
+          callId: event.callId,
+          name: event.name,
+          durationMs: event.durationMs,
+          ok: event.ok,
+        });
       },
     };
     bridge = await deps.bridgeFactory({ ticket, sessionHandlersForBridge });
