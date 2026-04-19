@@ -92,6 +92,10 @@ public struct RealtimeCapabilityConfig: Sendable, Equatable {
     public let voice: String
     public let inputSampleRate: Int
     public let outputSampleRate: Int
+    /// Ordered list of models/deployments to try after `model` when a connection
+    /// fails with a transient error (1006, 1011, 429, 503, network timeout). The
+    /// first entry is the first fallback. Empty means no fallback.
+    public let modelFallbacks: [String]
 
     public init(
         kind: VoiceProviderKind,
@@ -99,7 +103,8 @@ public struct RealtimeCapabilityConfig: Sendable, Equatable {
         model: String,
         voice: String,
         inputSampleRate: Int = 16_000,
-        outputSampleRate: Int = 24_000
+        outputSampleRate: Int = 24_000,
+        modelFallbacks: [String] = []
     ) {
         self.kind = kind
         self.credentials = credentials
@@ -107,5 +112,11 @@ public struct RealtimeCapabilityConfig: Sendable, Equatable {
         self.voice = voice
         self.inputSampleRate = inputSampleRate
         self.outputSampleRate = outputSampleRate
+        self.modelFallbacks = modelFallbacks
+    }
+
+    /// Full attempt order starting with the primary model.
+    public var attemptOrder: [String] {
+        [self.model] + self.modelFallbacks
     }
 }

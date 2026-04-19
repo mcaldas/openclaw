@@ -28,6 +28,8 @@ public struct TalkProviderSurface: Sendable, Equatable {
     public let realtimeModel: String?
     public let realtimeVoice: String?
     public let realtimeApiVersion: String?
+    public let realtimeModelFallbacks: [String]
+    public let enableRealtime: Bool
 
     public init(
         kind: VoiceProviderKind?,
@@ -47,7 +49,9 @@ public struct TalkProviderSurface: Sendable, Equatable {
         useServerTranscribe: Bool,
         realtimeModel: String?,
         realtimeVoice: String?,
-        realtimeApiVersion: String?
+        realtimeApiVersion: String?,
+        realtimeModelFallbacks: [String] = [],
+        enableRealtime: Bool = false
     ) {
         self.kind = kind
         self.rawKindString = rawKindString
@@ -67,6 +71,8 @@ public struct TalkProviderSurface: Sendable, Equatable {
         self.realtimeModel = realtimeModel
         self.realtimeVoice = realtimeVoice
         self.realtimeApiVersion = realtimeApiVersion
+        self.realtimeModelFallbacks = realtimeModelFallbacks
+        self.enableRealtime = enableRealtime
     }
 }
 
@@ -121,6 +127,22 @@ public enum TalkProviderSurfaceParser {
         let realtimeApiVersion = self.trimmed(config["realtimeApiVersion"]?.stringValue)
             ?? self.trimmed(realtimeNested?["apiVersion"]?.stringValue)
 
+        // Fallbacks: accept either a top-level `realtimeModelFallbacks: [string]` or a
+        // nested `realtime.modelFallbacks` / `realtime.fallbacks`. Normalize to a
+        // trimmed, non-empty string list preserving order.
+        let rawFallbacks: [AnyCodable]? = config["realtimeModelFallbacks"]?.arrayValue
+            ?? realtimeNested?["modelFallbacks"]?.arrayValue
+            ?? realtimeNested?["fallbacks"]?.arrayValue
+        let realtimeModelFallbacks: [String] = rawFallbacks?.compactMap {
+            self.trimmed($0.stringValue)
+        } ?? []
+
+        // `enableRealtime` is opt-in. Supports top-level `enableRealtime` or nested
+        // `realtime.enabled`.
+        let enableRealtime = config["enableRealtime"]?.boolValue
+            ?? realtimeNested?["enabled"]?.boolValue
+            ?? false
+
         return TalkProviderSurface(
             kind: kind,
             rawKindString: rawKindString,
@@ -139,7 +161,9 @@ public enum TalkProviderSurfaceParser {
             useServerTranscribe: useServerTranscribe,
             realtimeModel: realtimeModel,
             realtimeVoice: realtimeVoice,
-            realtimeApiVersion: realtimeApiVersion)
+            realtimeApiVersion: realtimeApiVersion,
+            realtimeModelFallbacks: realtimeModelFallbacks,
+            enableRealtime: enableRealtime)
     }
 
     private static func trimmed(_ value: String?) -> String? {
@@ -235,6 +259,12 @@ public extension TalkProviderSurface {
 
     /// Produce a `RealtimeCapabilityConfig` when the user has enabled realtime via
     /// `realtimeModel`. Used by Tier 2.
+    ///
+    /// Fallbacks: if `realtimeModelFallbacks` is non-empty, use it verbatim (primary
+    /// omitted, dedup preserved by caller). Otherwise auto-default to `["gpt-realtime"]`
+    /// when the primary matches `gpt-realtime-1-5*` (e.g. `gpt-realtime-1-5`,
+    /// `gpt-realtime-1.5@2026-02-23`) so the Tier 2 primary degrades cleanly to the
+    /// production 1.0 deployment.
     func makeRealtimeConfig(fallbackVoice: String = "alloy") -> RealtimeCapabilityConfig? {
         guard let kind = self.kind, kind == .openai || kind == .azureOpenai else { return nil }
         guard let apiKey = self.apiKey, !apiKey.isEmpty else { return nil }
@@ -257,10 +287,40 @@ public extension TalkProviderSurface {
         case .elevenlabs:
             return nil
         }
+        let fallbacks = self.resolvedRealtimeFallbacks(primary: model)
         return RealtimeCapabilityConfig(
             kind: kind,
             credentials: credentials,
             model: model,
-            voice: self.realtimeVoice ?? self.voice ?? fallbackVoice)
+            voice: self.realtimeVoice ?? self.voice ?? fallbackVoice,
+            modelFallbacks: fallbacks)
+    }
+
+    /// Normalize fallbacks: honor explicit list first (drop blanks + the primary),
+    /// else auto-default `["gpt-realtime"]` when the primary looks like a 1.5 variant.
+    internal func resolvedRealtimeFallbacks(primary: String) -> [String] {
+        let trimmedPrimary = primary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !self.realtimeModelFallbacks.isEmpty {
+            var seen = Set<String>([trimmedPrimary])
+            var out: [String] = []
+            for raw in self.realtimeModelFallbacks {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, !seen.contains(trimmed) else { continue }
+                seen.insert(trimmed)
+                out.append(trimmed)
+            }
+            return out
+        }
+        if Self.primaryMatchesRealtime15(trimmedPrimary) {
+            return ["gpt-realtime"]
+        }
+        return []
+    }
+
+    /// Match `gpt-realtime-1-5*` / `gpt-realtime-1.5*` so either deployment name style
+    /// picks up the auto-fallback.
+    private static func primaryMatchesRealtime15(_ model: String) -> Bool {
+        let lower = model.lowercased()
+        return lower.hasPrefix("gpt-realtime-1-5") || lower.hasPrefix("gpt-realtime-1.5")
     }
 }
