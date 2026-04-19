@@ -221,7 +221,9 @@ final class TalkModeManager: NSObject {
            let realtimeConfig = self.resolveRealtimeCapabilityConfig(directive: nil)
         {
             do {
-                try Self.configureAudioSession()
+                // Realtime path uses `.voiceChat` for built-in iOS acoustic echo
+                // cancellation; Tier 1 stays on `.spokenAudio`.
+                try Self.configureRealtimeAudioSession()
                 self.captureMode = .continuous
                 try await self.startRealtimeRecognition(config: realtimeConfig)
                 self.isListening = true
@@ -764,14 +766,31 @@ final class TalkModeManager: NSObject {
 
         let runtime = self.talkRealtimeRuntime
         runtime.delegate = self.makeRealtimeDelegate()
+        // Resolve the turn-detection config so the session actor picks the right
+        // strategy without the manager knowing the payload layout. A nil surface
+        // (or nil fields) leaves the session on its echo-loop-tuned defaults
+        // (semantic_vad, 700ms silence).
+        let turnDetection = self.resolveRealtimeTurnDetection()
         do {
             try await runtime.start(
                 config: config,
-                factoryOverride: self.realtimeWebSocketFactoryOverride)
+                factoryOverride: self.realtimeWebSocketFactoryOverride,
+                turnDetection: turnDetection)
         } catch {
             self.teardownRealtimeMicTap()
             throw error
         }
+    }
+
+    /// Build a `TurnDetectionConfig` from the current provider surface, honoring
+    /// optional gateway overrides for vad type + silence window.
+    private func resolveRealtimeTurnDetection() -> OpenAIRealtimeVoiceSession.TurnDetectionConfig {
+        let base = OpenAIRealtimeVoiceSession.TurnDetectionConfig.default
+        let kind = OpenAIRealtimeVoiceSession.TurnDetectionKind.from(
+            rawString: self.providerSurface?.realtimeVadType)
+        let silence = self.providerSurface?.realtimeSilenceMs
+        if kind == nil, silence == nil { return base }
+        return base.overriding(kind: kind, silenceDurationMs: silence)
     }
 
     /// Install the realtime mic tap. Reuses `AudioTapDiagnostics` so the UI level
@@ -2668,6 +2687,28 @@ extension TalkModeManager {
             .allowBluetoothHFP,
             .defaultToSpeaker,
         ])
+        try? session.setPreferredSampleRate(48_000)
+        try? session.setPreferredIOBufferDuration(0.02)
+        try session.setActive(true, options: [])
+    }
+
+    /// Realtime-mode audio session: `.voiceChat` activates `AUVoiceProcessingIO`
+    /// under the hood, which enables iOS acoustic echo cancellation, noise
+    /// suppression, and automatic gain control. This is the canonical full-duplex
+    /// voice-chat configuration and is what prevents the realtime model from
+    /// triggering its own `server_vad` on speaker-played TTS audio.
+    ///
+    /// Only used by the Tier 2 realtime path — Tier 1 keeps `.spokenAudio` so the
+    /// existing ElevenLabs / discrete STT behavior is untouched.
+    static func configureRealtimeAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
+            .defaultToSpeaker,
+            .allowBluetooth,
+            .allowBluetoothA2DP,
+        ])
+        // Speaker/AEC path prefers 24 kHz-aligned buffers; keep the 20ms IO
+        // window so the 16 kHz input resampler continues to receive steady chunks.
         try? session.setPreferredSampleRate(48_000)
         try? session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true, options: [])

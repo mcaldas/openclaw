@@ -114,15 +114,40 @@ private func testConfig(
         #expect(text.contains("\"input_audio_format\":\"pcm16\""))
         #expect(text.contains("\"output_audio_format\":\"pcm16\""))
         #expect(text.contains("\"voice\":\"alloy\""))
-        #expect(text.contains("\"type\":\"server_vad\""))
+        // Default is semantic_vad with a 700ms silence window — the echo-loop fix.
+        #expect(text.contains("\"type\":\"semantic_vad\""))
         #expect(text.contains("\"threshold\":0.5"))
-        #expect(text.contains("\"silence_duration_ms\":500"))
+        #expect(text.contains("\"silence_duration_ms\":700"))
         #expect(text.contains("\"prefix_padding_ms\":300"))
         #expect(text.contains("\"create_response\":true"))
         #expect(text.contains("\"model\":\"whisper-1\""))
         // Second call produces byte-identical output (no timestamps or UUIDs).
         let data2 = session.makeSessionUpdatePayload()
         #expect(data == data2)
+    }
+
+    @Test func turnDetectionOverrideToServerVadWithLongerSilence() {
+        let stub = StubRealtimeWebSocket()
+        let turnDetection = OpenAIRealtimeVoiceSession.TurnDetectionConfig.default
+            .overriding(kind: .serverVad, silenceDurationMs: 1200)
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub },
+            turnDetection: turnDetection)
+        let text = String(data: session.makeSessionUpdatePayload(), encoding: .utf8)!
+        #expect(text.contains("\"type\":\"server_vad\""))
+        #expect(text.contains("\"silence_duration_ms\":1200"))
+        // Prefix padding + threshold should keep their defaults after override.
+        #expect(text.contains("\"threshold\":0.5"))
+        #expect(text.contains("\"prefix_padding_ms\":300"))
+    }
+
+    @Test func turnDetectionKindParsesLenientStrings() {
+        #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: "server_vad") == .serverVad)
+        #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: "Semantic") == .semanticVad)
+        #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: "serverVAD") == .serverVad)
+        #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: "chaos") == nil)
+        #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: nil) == nil)
     }
 
     @Test func assistantAudioDeltaIsBase64DecodedToPCM16() async throws {

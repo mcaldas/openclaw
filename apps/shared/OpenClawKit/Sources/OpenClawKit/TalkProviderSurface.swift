@@ -30,6 +30,12 @@ public struct TalkProviderSurface: Sendable, Equatable {
     public let realtimeApiVersion: String?
     public let realtimeModelFallbacks: [String]
     public let enableRealtime: Bool
+    /// Optional gateway-supplied turn-detection type override. Accepts
+    /// `"server_vad"` or `"semantic_vad"`. Nil means "use the client default".
+    public let realtimeVadType: String?
+    /// Optional gateway-supplied VAD silence window in milliseconds. Nil means
+    /// "use the client default".
+    public let realtimeSilenceMs: Int?
 
     public init(
         kind: VoiceProviderKind?,
@@ -51,7 +57,9 @@ public struct TalkProviderSurface: Sendable, Equatable {
         realtimeVoice: String?,
         realtimeApiVersion: String?,
         realtimeModelFallbacks: [String] = [],
-        enableRealtime: Bool = false
+        enableRealtime: Bool = false,
+        realtimeVadType: String? = nil,
+        realtimeSilenceMs: Int? = nil
     ) {
         self.kind = kind
         self.rawKindString = rawKindString
@@ -73,6 +81,8 @@ public struct TalkProviderSurface: Sendable, Equatable {
         self.realtimeApiVersion = realtimeApiVersion
         self.realtimeModelFallbacks = realtimeModelFallbacks
         self.enableRealtime = enableRealtime
+        self.realtimeVadType = realtimeVadType
+        self.realtimeSilenceMs = realtimeSilenceMs
     }
 }
 
@@ -143,6 +153,16 @@ public enum TalkProviderSurfaceParser {
             ?? realtimeNested?["enabled"]?.boolValue
             ?? false
 
+        // Optional VAD overrides. Accept either top-level or nested form so gateway
+        // operators can tune echo-loop behavior from config without an app rebuild.
+        // Both are optional; the session uses client defaults when nil.
+        let realtimeVadType = self.trimmed(config["realtimeVadType"]?.stringValue)
+            ?? self.trimmed(realtimeNested?["vadType"]?.stringValue)
+            ?? self.trimmed(realtimeNested?["turnDetection"]?.stringValue)
+        let realtimeSilenceMs = config["realtimeSilenceMs"]?.intValue
+            ?? realtimeNested?["silenceMs"]?.intValue
+            ?? realtimeNested?["silenceDurationMs"]?.intValue
+
         return TalkProviderSurface(
             kind: kind,
             rawKindString: rawKindString,
@@ -163,7 +183,9 @@ public enum TalkProviderSurfaceParser {
             realtimeVoice: realtimeVoice,
             realtimeApiVersion: realtimeApiVersion,
             realtimeModelFallbacks: realtimeModelFallbacks,
-            enableRealtime: enableRealtime)
+            enableRealtime: enableRealtime,
+            realtimeVadType: realtimeVadType,
+            realtimeSilenceMs: realtimeSilenceMs)
     }
 
     private static func trimmed(_ value: String?) -> String? {

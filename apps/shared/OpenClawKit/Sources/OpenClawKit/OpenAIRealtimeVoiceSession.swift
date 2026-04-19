@@ -39,25 +39,68 @@ public actor OpenAIRealtimeVoiceSession {
     private var activeDeployment: String?
     private var isClosed = false
 
+    /// Which server-side turn detection strategy to request. `semanticVad` is the
+    /// iOS-talk default now because it is less twitchy with self-playback audio
+    /// bleed when voice-chat AEC is also on; `serverVad` stays available as an
+    /// opt-out and for tests.
+    public enum TurnDetectionKind: String, Sendable, Equatable {
+        case serverVad = "server_vad"
+        case semanticVad = "semantic_vad"
+
+        /// Parse a gateway-supplied string override. Unknown / nil values fall back
+        /// to the caller's default. Accepts the canonical `server_vad` /
+        /// `semantic_vad` plus a few forgiving spellings.
+        public static func from(rawString raw: String?) -> TurnDetectionKind? {
+            guard let raw else { return nil }
+            switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "server_vad", "server", "servervad": return .serverVad
+            case "semantic_vad", "semantic", "semanticvad": return .semanticVad
+            default: return nil
+            }
+        }
+    }
+
     /// Tuning knobs kept as a small struct so tests and tier-2 tuning patches stay
-    /// trivial. Defaults match the Tier 2 design note.
+    /// trivial. Defaults are tuned for the iOS echo-loop fix: `semanticVad` trims
+    /// false-positive "assistant audio interrupted the user" triggers and a longer
+    /// silence window keeps the model from cutting users off mid-thought.
     public struct TurnDetectionConfig: Sendable, Equatable {
+        public let kind: TurnDetectionKind
         public let threshold: Double
         public let silenceDurationMs: Int
         public let prefixPaddingMs: Int
         public let createResponse: Bool
 
         public static let `default` = TurnDetectionConfig(
+            kind: .semanticVad,
             threshold: 0.5,
-            silenceDurationMs: 500,
+            silenceDurationMs: 700,
             prefixPaddingMs: 300,
             createResponse: true)
 
-        public init(threshold: Double, silenceDurationMs: Int, prefixPaddingMs: Int, createResponse: Bool) {
+        public init(
+            kind: TurnDetectionKind = .semanticVad,
+            threshold: Double,
+            silenceDurationMs: Int,
+            prefixPaddingMs: Int,
+            createResponse: Bool
+        ) {
+            self.kind = kind
             self.threshold = threshold
             self.silenceDurationMs = silenceDurationMs
             self.prefixPaddingMs = prefixPaddingMs
             self.createResponse = createResponse
+        }
+
+        /// Produce a copy with selective overrides. Used by the iOS talk manager
+        /// when the gateway config supplies `realtimeVadType` / `realtimeSilenceMs`.
+        public func overriding(kind: TurnDetectionKind? = nil, silenceDurationMs: Int? = nil) -> TurnDetectionConfig {
+            TurnDetectionConfig(
+                kind: kind ?? self.kind,
+                threshold: self.threshold,
+                silenceDurationMs: silenceDurationMs ?? self.silenceDurationMs,
+                prefixPaddingMs: self.prefixPaddingMs,
+                createResponse: self.createResponse)
         }
     }
 
@@ -279,7 +322,7 @@ public actor OpenAIRealtimeVoiceSession {
                 "output_audio_format": "pcm16",
                 "voice": self.config.voice,
                 "turn_detection": [
-                    "type": "server_vad",
+                    "type": self.turnDetection.kind.rawValue,
                     "threshold": self.turnDetection.threshold,
                     "silence_duration_ms": self.turnDetection.silenceDurationMs,
                     "prefix_padding_ms": self.turnDetection.prefixPaddingMs,

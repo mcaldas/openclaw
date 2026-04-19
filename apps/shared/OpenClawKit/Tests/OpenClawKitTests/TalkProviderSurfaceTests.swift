@@ -120,4 +120,41 @@ import Testing
         #expect(ttsConfig?.voice == "coral")
         #expect(ttsConfig?.responseFormat == .pcm)
     }
+
+    @Test func parsesRealtimeVadOverridesTopLevel() {
+        let config: [String: AnyCodable] = [
+            "apiKey": AnyCodable("k"),
+            "realtimeModel": AnyCodable("gpt-realtime-1-5"),
+            "realtimeVadType": AnyCodable("server_vad"),
+            "realtimeSilenceMs": AnyCodable(950),
+        ]
+        let surface = TalkProviderSurfaceParser.parse(rawProviderId: "openai", config: config)
+        #expect(surface.realtimeVadType == "server_vad")
+        #expect(surface.realtimeSilenceMs == 950)
+    }
+
+    @Test func parsesRealtimeVadOverridesNested() {
+        let config: [String: AnyCodable] = [
+            "apiKey": AnyCodable("k"),
+            "realtime": AnyCodable([
+                "model": "gpt-realtime",
+                "vadType": "semantic_vad",
+                "silenceMs": 600,
+            ] as [String: Any]),
+        ]
+        let surface = TalkProviderSurfaceParser.parse(rawProviderId: "openai", config: config)
+        #expect(surface.realtimeVadType == "semantic_vad")
+        #expect(surface.realtimeSilenceMs == 600)
+    }
+
+    @Test func defaultsRealtimeVadOverridesToNilWhenMissing() {
+        let surface = TalkProviderSurfaceParser.parse(
+            rawProviderId: "azure-openai",
+            config: [
+                "apiKey": AnyCodable("k"),
+                "azureEndpoint": AnyCodable("https://example.openai.azure.com"),
+            ])
+        #expect(surface.realtimeVadType == nil)
+        #expect(surface.realtimeSilenceMs == nil)
+    }
 }
