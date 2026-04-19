@@ -34,7 +34,44 @@ See `docs/voice/gateway-realtime-bridge.md` for the end-to-end design.
 
 ## Prompt cache stability
 
-- `session.update` is sent by the provider bridge, not this module. When
-  commit 3 adds `instructions` + `tools`, keep the tool ordering
-  deterministic and the instructions bytes stable across turns — see
-  the prompt-cache rule in the root `CLAUDE.md`.
+- `session.update` is sent by the provider bridge, not this module. The
+  factory composes `instructions` + `tools` once at bridge-build time;
+  tool ordering is preserved verbatim from the agent registry and the
+  voice preamble is a constant string, so turn-to-turn the prefix is
+  byte-identical.
+- `session-prompt.ts` appends the voice preamble at the TAIL of the
+  composed system prompt. Adding voice-specific content anywhere other
+  than the tail would invalidate the cached text-chat prefix.
+- `tool-marshalling.ts` is a pure transform. Do not introduce sorts,
+  set iteration, or map iteration that depend on insertion order of
+  non-deterministic sources (plugin load timing, filesystem reads).
+
+## Voice tool filter
+
+- `listAgentToolsForChannel(agentId, "voice", ...)` in
+  `src/agents/list-channel-tools.ts` is the only seam that decides which
+  tools voice sees. It silent-disables approval-sensitive tools
+  (`exec`, `process`, `write`, `edit`, `apply_patch`) because the
+  realtime model has no approval UI; the v1 UX is a spoken nudge
+  routed through `buildVoiceToolDisabledHint` when the model tries to
+  call a disabled tool. The dispatch wiring for that nudge lands with
+  the tool-execution loop.
+- Do not extend this filter with ad-hoc voice-mode flags scattered
+  around the bridge. If a new class of tools needs a voice-specific
+  policy, extend the disabled set in `list-channel-tools.ts` and the
+  nudge in `buildVoiceToolDisabledHint`.
+
+## Memory snapshot
+
+- `loadVoiceMemorySnapshot` reads the tail of the matching agent's
+  normal text chat transcript and injects it as
+  `conversation.item.create` entries. This picks up `lossless-claw`
+  compression naturally when active (the compression rewrites the
+  transcript in place).
+- Direct `memory-core` summary injection is intentionally deferred.
+  See `docs/voice/gateway-realtime-bridge.md` -> "A memory snapshot is
+  injected" for the rationale. Do not add a second memory source
+  without also deciding how it composes with the transcript tail.
+- `active-memory` is explicitly excluded for voice; its per-turn cost
+  is 20-30 s on this user's workload with empty output, and spending
+  that latency at session start produces no useful signal for voice.

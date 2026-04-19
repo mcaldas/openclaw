@@ -195,23 +195,35 @@ Tools whose schemas cannot be losslessly expressed in the OpenAI realtime
 inputs) are dropped and a gateway-side warning is logged. Voice mode never
 auto-adds tools that text mode does not have.
 
-A memory snapshot is injected once, as a single `conversation.item.create`
-before the first `response.create`, at session start only. It is never
-re-injected on subsequent turns.
+A memory snapshot is injected once, before the first `response.create`,
+at session start only. It is never re-injected on subsequent turns.
 
-Sources:
+Commit 4 implementation (what ships today):
 
-- `memory-core` active summary (most recent agent-chosen summary).
-- `lossless-claw` conversation-history compression output for the matching
-  agent's default text session (recent-history compression, not full rewind).
+- Read the tail of the matching agent's default text chat session via
+  `readSessionMessages(sessionId, storePath)` and inject the last N
+  user/assistant text turns as individual `conversation.item.create`
+  entries before the first `response.create`.
+- When `lossless-claw` is active for that session, the transcript tail is
+  already in its compressed form, so the voice session inherits the
+  compression without a voice-specific `lossless-claw` integration.
+- Size budget: 8 KB total (character count) for the injected history; the
+  oldest turns are trimmed first until the payload fits.
 
-Explicitly excluded: `active-memory`. Its per-turn cost on this user's
-workload is 20-30 s and it returns empty summaries; spending that latency
-once at session start produces no useful signal for voice.
+Deferred to a follow-up: direct `memory-core` summary injection. The
+correct implementation is to invoke the agent's registered context-engine
+`assemble()` with a voice-mode flag and splice the produced summary-
+bearing messages. That path is architecturally aligned with how text
+chat consumes memory, but it requires plumbing the context engine
+registry into the voice-run bootstrap and has non-trivial latency
+implications at session start. Decision recorded here rather than being
+invisible in code; revisit once the first voice round-trip is observed
+end-to-end.
 
-Size budget: 4 KB for the memory summary + 8 KB for compressed history,
-measured by character count not tokens. If budgets are exceeded, compressed
-history is trimmed oldest-first.
+Explicitly excluded for the lifetime of this design: `active-memory`.
+Its per-turn cost on this user's workload is 20-30 s and it returns empty
+summaries; spending that latency at session start produces no useful
+signal for voice.
 
 ## Tool dispatch
 

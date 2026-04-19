@@ -204,6 +204,22 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     });
   }
 
+  /**
+   * Seed a conversation item before the first `response.create`. Used
+   * by the gateway voice bridge to inject a history tail so the
+   * realtime model has context of the recent text turns.
+   */
+  sendConversationItem(item: {
+    type: "message";
+    role: "user" | "assistant" | "system";
+    content: Array<{ type: "input_text" | "text"; text: string }>;
+  }): void {
+    this.sendEvent({
+      type: "conversation.item.create",
+      item,
+    });
+  }
+
   submitToolResult(callId: string, result: unknown): void {
     this.sendEvent({
       type: "conversation.item.create",

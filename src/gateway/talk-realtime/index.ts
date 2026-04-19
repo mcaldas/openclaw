@@ -50,3 +50,18 @@ export {
   createDefaultTalkRealtimeBridgeFactory,
   type TalkRealtimeBridgeFactoryDeps,
 } from "./bridge-factory.js";
+
+export {
+  buildVoiceSystemPrompt,
+  VOICE_SYSTEM_PROMPT_PREAMBLE,
+  type BuildVoiceSystemPromptOptions,
+} from "./session-prompt.js";
+
+export { marshalAgentToolsForRealtime, type MarshalToolsResult } from "./tool-marshalling.js";
+
+export {
+  formatSnapshotFromMessages,
+  loadVoiceMemorySnapshot,
+  type VoiceMemoryItem,
+  type VoiceMemorySnapshotOptions,
+} from "./memory-snapshot.js";

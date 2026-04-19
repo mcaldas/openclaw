@@ -68,11 +68,32 @@ export type RealtimeVoiceBridgeCreateRequest = RealtimeVoiceBridgeCallbacks & {
   audioFormat?: RealtimeVoiceAudioFormat;
 };
 
+/**
+ * Realtime conversation item the gateway may seed before the first
+ * `response.create`. Intentionally a narrow subset of the upstream
+ * OpenAI realtime shape: text-only roles, no audio attachments. The
+ * voice bridge uses this to splice a short history tail without having
+ * to reach into provider-internal event shapes.
+ */
+export type RealtimeConversationItem = {
+  type: "message";
+  role: "user" | "assistant" | "system";
+  content: Array<{ type: "input_text" | "text"; text: string }>;
+};
+
 export type RealtimeVoiceBridge = {
   connect(): Promise<void>;
   sendAudio(audio: Buffer): void;
   setMediaTimestamp(ts: number): void;
   sendUserMessage?(text: string): void;
+  /**
+   * Inject a realtime conversation item WITHOUT kicking off a
+   * `response.create`. Used by the gateway voice bridge to seed the
+   * session with recent chat-history turns before the first realtime
+   * response. Optional so existing providers that have not opted in
+   * keep their current contract; callers should feature-check it.
+   */
+  sendConversationItem?(item: RealtimeConversationItem): void;
   triggerGreeting?(instructions?: string): void;
   submitToolResult(callId: string, result: unknown): void;
   acknowledgeMark(): void;
