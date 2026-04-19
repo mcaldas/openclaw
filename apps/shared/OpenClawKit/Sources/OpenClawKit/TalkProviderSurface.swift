@@ -36,6 +36,10 @@ public struct TalkProviderSurface: Sendable, Equatable {
     /// Optional gateway-supplied VAD silence window in milliseconds. Nil means
     /// "use the client default".
     public let realtimeSilenceMs: Int?
+    /// Optional persona / system instruction passed to the realtime session.
+    /// Short strings only (keep context window small). Nil means "use the
+    /// client-side default persona" in `OpenAIRealtimeVoiceSession`.
+    public let realtimeInstructions: String?
 
     public init(
         kind: VoiceProviderKind?,
@@ -59,7 +63,8 @@ public struct TalkProviderSurface: Sendable, Equatable {
         realtimeModelFallbacks: [String] = [],
         enableRealtime: Bool = false,
         realtimeVadType: String? = nil,
-        realtimeSilenceMs: Int? = nil
+        realtimeSilenceMs: Int? = nil,
+        realtimeInstructions: String? = nil
     ) {
         self.kind = kind
         self.rawKindString = rawKindString
@@ -83,6 +88,7 @@ public struct TalkProviderSurface: Sendable, Equatable {
         self.enableRealtime = enableRealtime
         self.realtimeVadType = realtimeVadType
         self.realtimeSilenceMs = realtimeSilenceMs
+        self.realtimeInstructions = realtimeInstructions
     }
 }
 
@@ -153,15 +159,18 @@ public enum TalkProviderSurfaceParser {
             ?? realtimeNested?["enabled"]?.boolValue
             ?? false
 
-        // Optional VAD overrides. Accept either top-level or nested form so gateway
-        // operators can tune echo-loop behavior from config without an app rebuild.
-        // Both are optional; the session uses client defaults when nil.
+        // Optional VAD + persona overrides. Accept either top-level or nested
+        // form so gateway operators can tune echo-loop behavior and persona from
+        // config without an app rebuild. All three are optional; the session uses
+        // client defaults when nil.
         let realtimeVadType = self.trimmed(config["realtimeVadType"]?.stringValue)
             ?? self.trimmed(realtimeNested?["vadType"]?.stringValue)
             ?? self.trimmed(realtimeNested?["turnDetection"]?.stringValue)
         let realtimeSilenceMs = config["realtimeSilenceMs"]?.intValue
             ?? realtimeNested?["silenceMs"]?.intValue
             ?? realtimeNested?["silenceDurationMs"]?.intValue
+        let realtimeInstructions = self.trimmed(config["realtimeInstructions"]?.stringValue)
+            ?? self.trimmed(realtimeNested?["instructions"]?.stringValue)
 
         return TalkProviderSurface(
             kind: kind,
@@ -185,7 +194,8 @@ public enum TalkProviderSurfaceParser {
             realtimeModelFallbacks: realtimeModelFallbacks,
             enableRealtime: enableRealtime,
             realtimeVadType: realtimeVadType,
-            realtimeSilenceMs: realtimeSilenceMs)
+            realtimeSilenceMs: realtimeSilenceMs,
+            realtimeInstructions: realtimeInstructions)
     }
 
     private static func trimmed(_ value: String?) -> String? {

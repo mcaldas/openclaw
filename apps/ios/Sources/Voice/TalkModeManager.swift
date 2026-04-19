@@ -766,16 +766,19 @@ final class TalkModeManager: NSObject {
 
         let runtime = self.talkRealtimeRuntime
         runtime.delegate = self.makeRealtimeDelegate()
-        // Resolve the turn-detection config so the session actor picks the right
-        // strategy without the manager knowing the payload layout. A nil surface
-        // (or nil fields) leaves the session on its echo-loop-tuned defaults
-        // (semantic_vad, 700ms silence).
+        // Resolve gateway-side overrides so the session actor picks the right
+        // turn-detection strategy and persona without the manager knowing the
+        // payload layout. A nil surface (or nil field) leaves the session on its
+        // echo-loop-tuned defaults (semantic_vad, 700ms silence, built-in
+        // persona).
         let turnDetection = self.resolveRealtimeTurnDetection()
+        let instructions = self.providerSurface?.realtimeInstructions
         do {
             try await runtime.start(
                 config: config,
                 factoryOverride: self.realtimeWebSocketFactoryOverride,
-                turnDetection: turnDetection)
+                turnDetection: turnDetection,
+                instructions: instructions)
         } catch {
             self.teardownRealtimeMicTap()
             throw error

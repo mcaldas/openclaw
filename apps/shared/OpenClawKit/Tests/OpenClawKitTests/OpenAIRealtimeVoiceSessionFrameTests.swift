@@ -150,6 +150,50 @@ private func testConfig(
         #expect(OpenAIRealtimeVoiceSession.TurnDetectionKind.from(rawString: nil) == nil)
     }
 
+    @Test func sessionUpdateIncludesInstructionsWhenProvided() {
+        let stub = StubRealtimeWebSocket()
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub },
+            instructions: "Persona for Mathias")
+        let text = String(data: session.makeSessionUpdatePayload(), encoding: .utf8)!
+        #expect(text.contains("\"instructions\":\"Persona for Mathias\""))
+    }
+
+    @Test func sessionUpdateUsesBuiltInDefaultInstructionsWhenNothingPassed() {
+        let stub = StubRealtimeWebSocket()
+        // Use the default parameter — the built-in persona should be wired.
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub })
+        let text = String(data: session.makeSessionUpdatePayload(), encoding: .utf8)!
+        #expect(text.contains("\"instructions\":"))
+        #expect(text.contains("OpenClaw assistant"))
+    }
+
+    @Test func sessionUpdateOmitsInstructionsWhenExplicitlyNil() {
+        let stub = StubRealtimeWebSocket()
+        // Explicit nil is the opt-out path: the session omits the field entirely
+        // so the server-side default persona applies.
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub },
+            instructions: nil)
+        let text = String(data: session.makeSessionUpdatePayload(), encoding: .utf8)!
+        #expect(!text.contains("\"instructions\""))
+    }
+
+    @Test func sessionUpdateOmitsInstructionsWhenExplicitlyEmpty() {
+        let stub = StubRealtimeWebSocket()
+        let session = OpenAIRealtimeVoiceSession(
+            config: testConfig(),
+            factory: { _ in stub },
+            instructions: "   ")
+        let text = String(data: session.makeSessionUpdatePayload(), encoding: .utf8)!
+        // Whitespace-only opt-out should not leak into the payload.
+        #expect(!text.contains("\"instructions\""))
+    }
+
     @Test func assistantAudioDeltaIsBase64DecodedToPCM16() async throws {
         let stub = StubRealtimeWebSocket(script: [
             .frame(.text(Self.assistantAudioDeltaFrame(bytes: [0x01, 0x02, 0x03, 0x04]))),

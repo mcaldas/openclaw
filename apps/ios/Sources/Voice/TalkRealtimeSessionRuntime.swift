@@ -55,23 +55,29 @@ final class TalkRealtimeSessionRuntime {
     /// the splice can be exercised without opening a real socket.
     ///
     /// `turnDetection` overrides the session VAD defaults; nil keeps the built-in
-    /// defaults from `OpenAIRealtimeVoiceSession`. The iOS talk manager wires
-    /// this from the gateway's `talk.<provider>.realtime*` config.
+    /// defaults from `OpenAIRealtimeVoiceSession`. `instructions` overrides the
+    /// persona; nil falls back to the built-in default. Both are wired by
+    /// `TalkModeManager` from the gateway's `talk.<provider>.realtime*` config.
     func start(
         config: RealtimeCapabilityConfig,
         policy: RealtimeReconnectPolicy = .default,
         factoryOverride: RealtimeWebSocketFactory? = nil,
-        turnDetection: OpenAIRealtimeVoiceSession.TurnDetectionConfig? = nil
+        turnDetection: OpenAIRealtimeVoiceSession.TurnDetectionConfig? = nil,
+        instructions: String? = nil
     ) async throws {
         await self.stopIfActive()
         let factory = factoryOverride
             ?? OpenAIRealtimeVoiceSession.makeURLSessionFactory(config: config)
         let resolvedTurnDetection = turnDetection ?? .default
+        // When the manager doesn't override, fall back to the session's built-in
+        // default persona so the realtime model still gets a consistent voice.
+        let resolvedInstructions = instructions ?? OpenAIRealtimeVoiceSession.defaultInstructions
         let session = OpenAIRealtimeVoiceSession(
             config: config,
             policy: policy,
             factory: factory,
-            turnDetection: resolvedTurnDetection)
+            turnDetection: resolvedTurnDetection,
+            instructions: resolvedInstructions)
         self.session = session
         let events = session.events
         self.eventConsumerTask = Task { [weak self] in

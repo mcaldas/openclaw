@@ -156,5 +156,29 @@ import Testing
             ])
         #expect(surface.realtimeVadType == nil)
         #expect(surface.realtimeSilenceMs == nil)
+        #expect(surface.realtimeInstructions == nil)
+    }
+
+    @Test func parsesRealtimeInstructionsTopLevel() {
+        let config: [String: AnyCodable] = [
+            "apiKey": AnyCodable("k"),
+            "realtimeModel": AnyCodable("gpt-realtime"),
+            "realtimeInstructions": AnyCodable("  Say hi like Mathias' assistant.  "),
+        ]
+        let surface = TalkProviderSurfaceParser.parse(rawProviderId: "openai", config: config)
+        // Parser trims surrounding whitespace.
+        #expect(surface.realtimeInstructions == "Say hi like Mathias' assistant.")
+    }
+
+    @Test func parsesRealtimeInstructionsNested() {
+        let config: [String: AnyCodable] = [
+            "apiKey": AnyCodable("k"),
+            "realtime": AnyCodable([
+                "model": "gpt-realtime",
+                "instructions": "Be concise.",
+            ] as [String: Any]),
+        ]
+        let surface = TalkProviderSurfaceParser.parse(rawProviderId: "openai", config: config)
+        #expect(surface.realtimeInstructions == "Be concise.")
     }
 }

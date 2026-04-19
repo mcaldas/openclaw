@@ -29,6 +29,10 @@ public actor OpenAIRealtimeVoiceSession {
     private let sleep: RealtimeClockSleep
     private let turnDetection: TurnDetectionConfig
     private let transcriptionModel: String
+    /// Persona / system instruction. Included in `session.update` when non-empty.
+    /// Nil (or whitespace-only) means "do not send the field" and the server-side
+    /// default persona applies.
+    private let instructions: String?
 
     private var eventContinuation: AsyncStream<RealtimeVoiceEvent>.Continuation?
     public nonisolated let events: AsyncStream<RealtimeVoiceEvent>
@@ -104,13 +108,22 @@ public actor OpenAIRealtimeVoiceSession {
         }
     }
 
+    /// Built-in default persona used when the gateway does not supply
+    /// `realtimeInstructions`. Intentionally short so it doesn't dominate the
+    /// realtime context window.
+    public static let defaultInstructions = """
+        You are the user's personal OpenClaw assistant. Be concise and conversational, \
+        like talking to a colleague. Ask clarifying questions when needed.
+        """
+
     public init(
         config: RealtimeCapabilityConfig,
         policy: RealtimeReconnectPolicy = .default,
         factory: @escaping RealtimeWebSocketFactory,
         sleep: @escaping RealtimeClockSleep = defaultRealtimeClockSleep,
         turnDetection: TurnDetectionConfig = .default,
-        transcriptionModel: String = "whisper-1"
+        transcriptionModel: String = "whisper-1",
+        instructions: String? = OpenAIRealtimeVoiceSession.defaultInstructions
     ) {
         self.config = config
         self.policy = policy
@@ -118,6 +131,7 @@ public actor OpenAIRealtimeVoiceSession {
         self.sleep = sleep
         self.turnDetection = turnDetection
         self.transcriptionModel = transcriptionModel
+        self.instructions = instructions
 
         var continuation: AsyncStream<RealtimeVoiceEvent>.Continuation!
         self.events = AsyncStream { continuation = $0 }
@@ -315,23 +329,33 @@ public actor OpenAIRealtimeVoiceSession {
     /// `nonisolated` (reads only immutable init values) so frame tests can assert
     /// the payload without awaiting the actor.
     public nonisolated func makeSessionUpdatePayload() -> Data {
+        var session: [String: Any] = [
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "voice": self.config.voice,
+            "turn_detection": [
+                "type": self.turnDetection.kind.rawValue,
+                "threshold": self.turnDetection.threshold,
+                "silence_duration_ms": self.turnDetection.silenceDurationMs,
+                "prefix_padding_ms": self.turnDetection.prefixPaddingMs,
+                "create_response": self.turnDetection.createResponse,
+            ] as [String: Any],
+            "input_audio_transcription": [
+                "model": self.transcriptionModel,
+            ] as [String: Any],
+        ]
+        // Include `instructions` only when non-empty. Nil or whitespace-only
+        // values omit the field entirely so the server-side default persona
+        // applies. Callers can pass `nil` or `""` to explicitly opt out.
+        if let raw = self.instructions {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                session["instructions"] = trimmed
+            }
+        }
         let body: [String: Any] = [
             "type": "session.update",
-            "session": [
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "voice": self.config.voice,
-                "turn_detection": [
-                    "type": self.turnDetection.kind.rawValue,
-                    "threshold": self.turnDetection.threshold,
-                    "silence_duration_ms": self.turnDetection.silenceDurationMs,
-                    "prefix_padding_ms": self.turnDetection.prefixPaddingMs,
-                    "create_response": self.turnDetection.createResponse,
-                ] as [String: Any],
-                "input_audio_transcription": [
-                    "model": self.transcriptionModel,
-                ] as [String: Any],
-            ] as [String: Any],
+            "session": session,
         ]
         return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]))
             ?? Data()
