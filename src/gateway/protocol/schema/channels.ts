@@ -36,6 +36,42 @@ export const TalkSpeakParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Params for `talk.realtime.start`: operator asks the gateway to open a
+ * short-lived realtime voice run against the active agent. Response carries a
+ * single-use ticket iOS uses to upgrade to the `/talk/realtime` WS. See
+ * docs/voice/gateway-realtime-bridge.md.
+ */
+export const TalkRealtimeStartParamsSchema = Type.Object(
+  {
+    agentId: Type.Optional(NonEmptyString),
+    providerId: Type.Optional(NonEmptyString),
+    voiceId: Type.Optional(NonEmptyString),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkRealtimeAudioSchema = Type.Object(
+  {
+    sampleRateHz: Type.Integer({ minimum: 8000 }),
+    format: Type.Literal("pcm16"),
+    channels: Type.Integer({ minimum: 1, maximum: 2 }),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkRealtimeStartResultSchema = Type.Object(
+  {
+    voiceRunId: NonEmptyString,
+    sessionKey: NonEmptyString,
+    ticket: NonEmptyString,
+    wsPath: NonEmptyString,
+    expiresAtMs: Type.Integer({ minimum: 0 }),
+    audio: TalkRealtimeAudioSchema,
+  },
+  { additionalProperties: false },
+);
+
 const talkProviderFieldSchemas = {
   apiKey: Type.Optional(SecretInputSchema),
 };

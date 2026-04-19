@@ -72,6 +72,7 @@ import {
 import type { PreauthConnectionBudget } from "./server/preauth-connection-budget.js";
 import type { ReadinessChecker } from "./server/readiness.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import type { TalkRealtimeHost } from "./talk-realtime/index.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
@@ -1133,6 +1134,7 @@ export function attachGatewayUpgradeHandler(opts: {
   httpServer: HttpServer;
   wss: WebSocketServer;
   canvasHost: CanvasHostHandler | null;
+  talkRealtimeHost?: TalkRealtimeHost | null;
   clients: Set<GatewayWsClient>;
   preauthConnectionBudget: PreauthConnectionBudget;
   resolvedAuth: ResolvedGatewayAuth;
@@ -1144,6 +1146,7 @@ export function attachGatewayUpgradeHandler(opts: {
     httpServer,
     wss,
     canvasHost,
+    talkRealtimeHost,
     clients,
     preauthConnectionBudget,
     resolvedAuth,
@@ -1187,6 +1190,13 @@ export function attachGatewayUpgradeHandler(opts: {
         if (canvasHost.handleUpgrade(req, socket, head)) {
           return;
         }
+      }
+      // Realtime voice WS (/talk/realtime). The upgrade host redeems a
+      // ticket issued by `talk.realtime.start` and then drives the
+      // provider bridge. Auth is entirely ticket-based; do not reuse
+      // the main gateway bearer path here.
+      if (talkRealtimeHost && talkRealtimeHost.handleUpgrade(req, socket, head)) {
+        return;
       }
       const preauthBudgetKey = resolveRequestClientIp(req, trustedProxies, allowRealIpFallback);
       if (wss.listenerCount("connection") === 0) {

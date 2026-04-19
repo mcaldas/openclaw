@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { loadConfig, readConfigFileSnapshot } from "../../config/config.js";
 import { redactConfigObject } from "../../config/redact-snapshot.js";
 import {
@@ -7,6 +8,7 @@ import {
 } from "../../config/talk.js";
 import type { TalkConfigResponse, TalkProviderConfig } from "../../config/types.gateway.js";
 import type { OpenClawConfig, TtsConfig, TtsProviderConfigMap } from "../../config/types.js";
+import { buildAgentMainSessionKey, DEFAULT_AGENT_ID } from "../../routing/session-key.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -22,8 +24,10 @@ import {
   type TalkSpeakParams,
   validateTalkConfigParams,
   validateTalkModeParams,
+  validateTalkRealtimeStartParams,
   validateTalkSpeakParams,
 } from "../protocol/index.js";
+import { TALK_REALTIME_AUDIO, TALK_REALTIME_WS_PATH } from "../talk-realtime/index.js";
 import { formatForLog } from "../ws-log.js";
 import { asRecord } from "./record-shared.js";
 import type { GatewayRequestHandlers } from "./types.js";
@@ -458,5 +462,64 @@ export const talkHandlers: GatewayRequestHandlers = {
     };
     context.broadcast("talk.mode", payload, { dropIfSlow: true });
     respond(true, payload, undefined);
+  },
+  "talk.realtime.start": ({ params, respond, context, client }) => {
+    if (!validateTalkRealtimeStartParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.realtime.start params: ${formatValidationErrors(
+            validateTalkRealtimeStartParams.errors,
+          )}`,
+        ),
+      );
+      return;
+    }
+    if (!context.talkRealtimeTicketRegistry) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.UNAVAILABLE,
+          "talk.realtime.start unavailable: gateway built without realtime bridge",
+        ),
+      );
+      return;
+    }
+    const connId = client?.connId;
+    if (!connId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, "talk.realtime.start requires connected operator"),
+      );
+      return;
+    }
+    const runtimeConfig = loadConfig();
+    const agentId =
+      normalizeOptionalString((params as { agentId?: unknown }).agentId) ?? DEFAULT_AGENT_ID;
+    const mainKey = runtimeConfig.session?.mainKey;
+    const sessionKey = buildAgentMainSessionKey({ agentId, mainKey });
+    const voiceRunId = randomUUID();
+    const ticket = context.talkRealtimeTicketRegistry.issue({
+      voiceRunId,
+      agentId,
+      operatorConnId: connId,
+      sessionKey,
+    });
+    respond(
+      true,
+      {
+        voiceRunId,
+        sessionKey,
+        ticket: ticket.ticket,
+        wsPath: TALK_REALTIME_WS_PATH,
+        expiresAtMs: ticket.expiresAtMs,
+        audio: TALK_REALTIME_AUDIO,
+      },
+      undefined,
+    );
   },
 };

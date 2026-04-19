@@ -94,9 +94,10 @@ Response:
 ```json
 {
   "voiceRunId": "9b7c…",
-  "sessionKey": "agent:main:default",
-  "ticket": "<short-lived jwt, 60s TTL>",
-  "wsUrl": "wss://<gateway-host>/talk/realtime",
+  "sessionKey": "agent:main:main",
+  "ticket": "<short-lived random token, 60s TTL>",
+  "wsPath": "/talk/realtime",
+  "expiresAtMs": 1700000120000,
   "audio": {
     "sampleRateHz": 24000,
     "format": "pcm16",
@@ -104,6 +105,10 @@ Response:
   }
 }
 ```
+
+The `sessionKey` uses the agent's configured `session.mainKey`; when unset,
+it falls back to `"main"` (the `DEFAULT_MAIN_KEY` constant in
+`src/routing/session-key.ts`), producing the shape `agent:<agentId>:main`.
 
 The ticket is single-use, bound to the operator's connect client id, and only
 valid for opening a WS to `/talk/realtime`. This keeps the control plane socket

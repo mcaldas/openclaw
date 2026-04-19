@@ -5,8 +5,8 @@ import {
   resolveDebugProxySettings,
 } from "openclaw/plugin-sdk/proxy-capture";
 import type {
+  RealtimeVoiceAudioFormat,
   RealtimeVoiceBridge,
-  RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceProviderConfig,
   RealtimeVoiceProviderPlugin,
   RealtimeVoiceTool,
@@ -45,7 +45,29 @@ type OpenAIRealtimeVoiceProviderConfig = {
   azureApiVersion?: string;
 };
 
-type OpenAIRealtimeVoiceBridgeConfig = RealtimeVoiceBridgeCreateRequest & {
+// Spelled out instead of intersecting with `RealtimeVoiceBridgeCreateRequest`:
+// keeping an intersection forces cross-package type resolution and confuses
+// oxlint's type-aware pass in this repo, which flags the imported alias as
+// an "error" type. We still expect every field of
+// `RealtimeVoiceBridgeCreateRequest` (callbacks, provider config, tools,
+// instructions, audioFormat) to be present on this type; if the SDK type
+// gains a new optional field, add it here too.
+type OpenAIRealtimeVoiceBridgeConfig = {
+  // RealtimeVoiceBridgeCallbacks
+  onAudio: (audio: Buffer) => void;
+  onClearAudio: () => void;
+  onMark?: (markName: string) => void;
+  onTranscript?: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
+  onToolCall?: (event: { itemId: string; callId: string; name: string; args: unknown }) => void;
+  onReady?: () => void;
+  onError?: (error: Error) => void;
+  onClose?: (reason: "completed" | "error") => void;
+  // RealtimeVoiceBridgeCreateRequest tail
+  providerConfig: RealtimeVoiceProviderConfig;
+  instructions?: string;
+  tools?: RealtimeVoiceTool[];
+  audioFormat?: RealtimeVoiceAudioFormat;
+  // OpenAI-specific
   apiKey: string;
   model?: string;
   voice?: OpenAIRealtimeVoice;
@@ -68,7 +90,7 @@ type RealtimeEvent = {
   error?: unknown;
 };
 
-type RealtimeSessionUpdate = {
+export type OpenAIRealtimeSessionUpdate = {
   type: "session.update";
   session: {
     modalities: string[];
@@ -380,35 +402,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private sendSessionUpdate(): void {
-    const cfg = this.config;
-    const sessionUpdate: RealtimeSessionUpdate = {
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        instructions: cfg.instructions,
-        voice: cfg.voice ?? "alloy",
-        input_audio_format: "g711_ulaw",
-        output_audio_format: "g711_ulaw",
-        input_audio_transcription: {
-          model: "whisper-1",
-        },
-        turn_detection: {
-          type: "server_vad",
-          threshold: cfg.vadThreshold ?? 0.5,
-          prefix_padding_ms: cfg.prefixPaddingMs ?? 300,
-          silence_duration_ms: cfg.silenceDurationMs ?? 500,
-          create_response: true,
-        },
-        temperature: cfg.temperature ?? 0.8,
-        ...(cfg.tools && cfg.tools.length > 0
-          ? {
-              tools: cfg.tools,
-              tool_choice: "auto",
-            }
-          : {}),
-      },
-    };
-    this.sendEvent(sessionUpdate);
+    this.sendEvent(buildOpenAIRealtimeSessionUpdate(this.config));
   }
 
   private handleEvent(event: RealtimeEvent): void {
@@ -549,6 +543,48 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.ws.send(payload);
     }
   }
+}
+
+/**
+ * Build the OpenAI realtime `session.update` payload from the bridge
+ * config. Exported so the gateway-side audio-format contract can be
+ * tested without standing up a WebSocket to Azure.
+ *
+ * Prompt-cache stability: tool ordering is preserved as given; do not
+ * re-sort here. Keeping this builder pure makes it easy to assert the
+ * output against a snapshot in tests.
+ */
+export function buildOpenAIRealtimeSessionUpdate(
+  cfg: OpenAIRealtimeVoiceBridgeConfig,
+): OpenAIRealtimeSessionUpdate {
+  const audioFormat: RealtimeVoiceAudioFormat = cfg.audioFormat ?? "g711_ulaw";
+  return {
+    type: "session.update",
+    session: {
+      modalities: ["text", "audio"],
+      instructions: cfg.instructions,
+      voice: cfg.voice ?? "alloy",
+      input_audio_format: audioFormat,
+      output_audio_format: audioFormat,
+      input_audio_transcription: {
+        model: "whisper-1",
+      },
+      turn_detection: {
+        type: "server_vad",
+        threshold: cfg.vadThreshold ?? 0.5,
+        prefix_padding_ms: cfg.prefixPaddingMs ?? 300,
+        silence_duration_ms: cfg.silenceDurationMs ?? 500,
+        create_response: true,
+      },
+      temperature: cfg.temperature ?? 0.8,
+      ...(cfg.tools && cfg.tools.length > 0
+        ? {
+            tools: cfg.tools,
+            tool_choice: "auto",
+          }
+        : {}),
+    },
+  };
 }
 
 export function buildOpenAIRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {

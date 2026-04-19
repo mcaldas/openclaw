@@ -13,6 +13,8 @@ import type { ConnectParams, ErrorShape, RequestFrame } from "../protocol/index.
 import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "../server-broadcast-types.js";
 import type { ChannelRuntimeSnapshot } from "../server-channel-runtime.types.js";
 import type { DedupeEntry } from "../server-shared.js";
+import type { TalkRealtimeTicketRegistry } from "../talk-realtime/ticket-registry.js";
+import type { VoiceRunRegistry } from "../talk-realtime/voice-run-registry.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
@@ -105,6 +107,18 @@ export type GatewayRequestContext = {
   ) => Promise<void>;
   broadcastVoiceWakeChanged: (triggers: string[]) => void;
   unavailableGatewayMethods?: ReadonlySet<string>;
+  /**
+   * Ticket store for realtime voice WS upgrades. Owned by the gateway
+   * boot flow and supplied to RPC handlers so `talk.realtime.start` can
+   * mint a ticket that `/talk/realtime` later redeems.
+   */
+  talkRealtimeTicketRegistry?: TalkRealtimeTicketRegistry;
+  /**
+   * Tracks the active realtime voice run per agent. Used by the RPC
+   * handler only for peek/diagnostics; eviction is driven from the
+   * upgrade host when a new run registers.
+   */
+  talkRealtimeVoiceRunRegistry?: VoiceRunRegistry;
 };
 
 export type GatewayRequestOptions = {

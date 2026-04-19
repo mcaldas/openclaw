@@ -442,6 +442,8 @@ export async function startGatewayServer(
     removeChatRun,
     chatAbortControllers,
     toolEventRecipients,
+    talkRealtimeTicketRegistry,
+    talkRealtimeVoiceRunRegistry,
   } = await createGatewayRuntimeState({
     cfg: cfgAtStart,
     bindHost,
@@ -695,6 +697,8 @@ export async function startGatewayServer(
       wizardRunner,
       broadcastVoiceWakeChanged,
       unavailableGatewayMethods,
+      talkRealtimeTicketRegistry,
+      talkRealtimeVoiceRunRegistry,
     });
 
     setFallbackGatewayContextResolver(() => gatewayRequestContext);

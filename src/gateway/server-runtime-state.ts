@@ -47,6 +47,13 @@ import {
 import type { ReadinessChecker } from "./server/readiness.js";
 import type { GatewayTlsRuntime } from "./server/tls.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import {
+  createDefaultTalkRealtimeBridgeFactory,
+  createTalkRealtimeHost,
+  TalkRealtimeTicketRegistry,
+  type TalkRealtimeHost,
+  VoiceRunRegistry,
+} from "./talk-realtime/index.js";
 
 export async function createGatewayRuntimeState(params: {
   cfg: import("../config/config.js").OpenClawConfig;
@@ -103,6 +110,9 @@ export async function createGatewayRuntimeState(params: {
   ) => ChatRunEntry | undefined;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   toolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+  talkRealtimeTicketRegistry: TalkRealtimeTicketRegistry;
+  talkRealtimeVoiceRunRegistry: VoiceRunRegistry;
+  talkRealtimeHost: TalkRealtimeHost;
 }> {
   pinActivePluginHttpRouteRegistry(params.pluginRegistry);
   if (params.pinChannelRegistry !== false) {
@@ -218,11 +228,31 @@ export async function createGatewayRuntimeState(params: {
       maxPayload: MAX_PREAUTH_PAYLOAD_BYTES,
     });
     const preauthConnectionBudget = createPreauthConnectionBudget();
+
+    // Realtime voice bridge: ticket registry + active-run registry +
+    // `/talk/realtime` upgrade host. The bridge factory reads the active
+    // `talk.providers.*` config at upgrade time (not at boot) so config
+    // hot reloads take effect on the next voice run without needing to
+    // rebuild the host.
+    const talkRealtimeTicketRegistry = new TalkRealtimeTicketRegistry();
+    const talkRealtimeVoiceRunRegistry = new VoiceRunRegistry();
+    const talkRealtimeHost: TalkRealtimeHost = createTalkRealtimeHost({
+      ticketRegistry: talkRealtimeTicketRegistry,
+      voiceRunRegistry: talkRealtimeVoiceRunRegistry,
+      bridgeFactory: createDefaultTalkRealtimeBridgeFactory(),
+      log: (level, message, meta) => {
+        if (level === "error") {
+          params.log.warn(`talk-realtime: ${message}${meta ? ` ${JSON.stringify(meta)}` : ""}`);
+        }
+      },
+    });
+
     for (const server of httpServers) {
       attachGatewayUpgradeHandler({
         httpServer: server,
         wss,
         canvasHost,
+        talkRealtimeHost,
         clients,
         preauthConnectionBudget,
         resolvedAuth: params.resolvedAuth,
@@ -272,6 +302,9 @@ export async function createGatewayRuntimeState(params: {
       removeChatRun,
       chatAbortControllers,
       toolEventRecipients,
+      talkRealtimeTicketRegistry,
+      talkRealtimeVoiceRunRegistry,
+      talkRealtimeHost,
     };
   } catch (err) {
     releasePinnedPluginHttpRouteRegistry(params.pluginRegistry);
