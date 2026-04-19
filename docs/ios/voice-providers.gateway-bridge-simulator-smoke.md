@@ -1,129 +1,180 @@
 # iOS voice: gateway-bridge simulator smoke log
 
 Branch: `feat/ios-voice-gateway-realtime-bridge`.
-Scope: commits 6 and 7 ship the iOS gateway realtime transport +
-`TalkRealtimeSessionRuntime`. This file records what was verified before
-commit 9 (TestFlight) and what still requires the VM-deployed bridge
+Scope: commits 6, 7, 9, 10 ship the iOS gateway realtime transport,
+`TalkRealtimeSessionRuntime`, schema config keys, and the
+`TalkModeManager` splice. This file records what is verified pre-
+TestFlight and what still requires real-device TestFlight to prove
+end-to-end.
 
-- real device to prove end-to-end.
+## What is verified today
 
-## What is verified today (pre-simulator)
+### Gateway TypeScript (pnpm)
 
-All commit 6/7 iOS surfaces are covered by `swift test`:
+All gateway surfaces around the realtime bridge:
 
-- `GatewayRealtimeCodecTests` (9 cases) — client-event encoding,
-  server-event decoding, lossless round-trip, malformed-input handling,
-  close-code pinning against `src/gateway/talk-realtime/protocol.ts`.
-- `GatewayRealtimeCloseCodeTests` (5 cases) — reconnect decision matrix,
-  4xxx range invariant, raw-value pinning.
-- `GatewayRealtimeTicketIssuerTests` (3 cases) — ticket RPC response
-  decoding, empty-params omission, malformed-response error path.
-- `RealtimeReconnectPolicyTests` (6 cases) — default schedule matches
-  the design-note spec, clamping, budget.
-- `RealtimeAudioResamplerTests` (7 cases) — int16 clipping, little-
-  endian byte order, frame buffering, 48 kHz -> 24 kHz decimation,
-  flush zero-padding, reset.
-- `TalkRealtimeTransportStreamingTests` (4 cases) — `sessionReady`
-  emission, audio+transcript forwarding, tool-call frame surfacing,
-  malformed-frame error surfacing.
+```bash
+pnpm test \
+  src/gateway/talk-realtime \
+  src/agents/list-channel-tools.test.ts \
+  extensions/openai/realtime-voice-provider.test.ts \
+  src/gateway/server-methods/talk.test.ts \
+  src/config/config.talk-validation.test.ts \
+  src/config/zod-schema.talk.test.ts
+```
 
-Run command:
+At commit 10 land (`065be6f0d3`): **84 passing tests** across 12 files
+covering protocol encoding, ticket registry, voice-run registry,
+session lifecycle, tool marshalling, tool dispatch, fallback and
+close-code mapping, system-prompt composition, memory snapshot tail,
+the `talk.realtime.start` RPC, and the new `realtimeBridge` schema
+config key.
+
+Drift + cycle gates green:
+
+```bash
+pnpm check:base-config-schema    # OK
+pnpm config:docs:check           # OK
+pnpm plugin-sdk:api:check        # OK
+pnpm check:import-cycles         # 0 cycles
+pnpm check:madge-import-cycles   # 0 cycles
+```
+
+### OpenClawKit Swift (swift test)
+
+Realtime transport + reconnect policy + audio resampler + runtime
+streaming:
 
 ```bash
 cd apps/shared/OpenClawKit && \
   swift test --filter "GatewayRealtime|RealtimeReconnect|RealtimeAudio|TalkRealtime"
 ```
 
-Result at commit 7 land (`ea0a05f457`): 34 passing tests across 6
-suites, total runtime ~30 ms.
+At commit 10 land: **36 passing tests** across 6 suites, ~30 ms total.
 
-Run command for the gateway side:
+### iOS app (xcodebuild, iPhone 17 simulator)
+
+Full iOS app build + the new splice test suite:
 
 ```bash
-pnpm test src/gateway/talk-realtime \
-  src/agents/list-channel-tools.test.ts \
-  extensions/openai/realtime-voice-provider.test.ts \
-  src/gateway/server-methods/talk.test.ts
+cd apps/ios && xcodegen generate
+xcodebuild -project OpenClaw.xcodeproj -scheme OpenClaw \
+  -destination 'platform=iOS Simulator,id=<iPhone 17 UDID>' \
+  -only-testing:OpenClawTests/TalkModeRealtimeSpliceTests test
 ```
 
-Result at commit 7 land: 85 passing tests (67 talk-realtime + 5
-list-channel-tools + 6 realtime-voice-provider + 5 talk RPC + 2
-extension hookups).
+At commit 10 land (iPhone 17 simulator, UDID `08DA429B-8B39-4649-8F6C-80179D3E04E8`):
 
-## What the simulator path confirms (commit 8 itself)
+- Full app BUILD SUCCEEDED (Debug iphonesimulator, arm64).
+- `TalkModeRealtimeSpliceTests`: **6 passing** across 1 suite, 0.09 s total:
+  - `micTapFrameRoundTripsAsBase64InputAudioBufferAppend` — PCM16 frames
+    from the mic-tap pathway serialize to `input_audio_buffer.append`
+    with exact base64 round-trip.
+  - `assistantAudioChunkRoutesToPCMPlayerBus` — realtime `onAssistantAudioChunk`
+    delegates into the shared `PCMStreamingAudioPlayer` bus; feeder
+    stays alive across multiple chunks; `isSpeaking` flips to `true`.
+  - `startIsIdempotentWhenReEnteringTalkMode` — start → teardown →
+    start dials cleanly without orphaned state.
+  - `disabledRealtimeLeavesTier1FlagOff` — regression guard: when
+    `realtimeBridge` is false (default), the splice never runs and
+    Tier 1 owns the loop.
+  - `enabledFlagPropagatesFromParsedConfig` — the
+    `TalkModeGatewayConfigParser` lifts `talk.providers.<id>.realtimeBridge`
+    from the `talk.config` payload into `realtimeBridgeEnabled` on the
+    parsed state.
+  - `bargeInCancelsInFlightResponseOverWS` — VAD-driven barge-in emits
+    a `response.cancel` frame on the WS.
+- Broader test suite run: 165 passing out of 168 ran. The 3 failures
+  (`NodeAppModelInvokeTests.handleInvokeCanvasCommandsUpdateScreen`,
+  `ShareToAgentDeepLinkTests.buildURLReturnsNilWhenPayloadEmpty` x2)
+  are **pre-existing on `origin/main`**; they do not touch realtime
+  voice code and are not caused by commits 9 or 10. Triage outside
+  this branch.
 
-When this smoke log is extended with a live simulator run, the
-procedure is:
+## What a live simulator smoke exercises (pending VM deploy)
+
+The automated splice tests above exercise every iOS-side code path
+against a scripted WebSocket stub. A live simulator smoke additionally
+validates the iOS app <-> VM-hosted gateway round-trip. That requires
+the VM deployment runbook (commit 12) to complete first.
 
 ### Pre-flight
 
-1. VM is running a build of this branch, not `openclaw@latest` from
-   npm. (See "VM deployment proposal" in the commit 7/8 report.)
+1. VM `az-openclaw-public` is running this branch's build, not
+   `openclaw@latest`. See commit 12 runbook for the exact rsync +
+   `npm link` + `systemctl --user restart openclaw-gateway` sequence.
 2. `openclaw channels status --probe` on the VM is green.
-3. `openclaw config get talk` shows `realtimeBridge: true` and an
-   `openai` realtime provider configured with the Azure keys.
-4. iOS simulator has this branch's app installed (via
-   `xcodegen generate && xcodebuild ...`) and the gateway connection
-   is configured to point at the VM via Tailscale funnel.
+3. On the VM: `openclaw config set talk.providers.openai.realtimeBridge true`
+   and `talk.providers.openai.realtimeModel gpt-realtime-1-5` and
+   `talk.providers.openai.realtimeApiVersion 2025-04-01-preview`.
+4. iOS simulator has this branch's app installed (`xcodebuild build`
+   against `iPhone 17` generic simulator, then install via
+   `xcrun simctl install booted <.app>`).
+5. Pair the simulator to the VM via the setup-code flow
+   (`openclaw devices pair` on VM, scan in iOS app).
 
 ### Simulator check-list
 
-| step                                                                                                       | expected observation                                                                                                                                                                                                                                          |
-| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Open app, tap the talk tab                                                                                 | Orb goes from `Offline` -> `Ready`. Gateway WS is connected (status pill green).                                                                                                                                                                              |
-| Call `talk.realtime.start` via an in-app debug button (added alongside the runtime wiring post-TestFlight) | RPC returns within ~100 ms with a `GatewayRealtimeTicket`. `voiceRunId` is a UUID; `sessionKey` is `agent:main:main` (or the configured main key).                                                                                                            |
-| Runtime opens `/talk/realtime?ticket=...`                                                                  | `session.ready` event received in the runtime consumer task. `onSessionReady` delegate fires; UI shows "Connected via bridge".                                                                                                                                |
-| Speak into the simulator mic ("what day is today?")                                                        | `userTranscriptPartial` -> `userTranscriptFinal` surfaces within ~200 ms of speech end. Simulator mic routes through `AVAudioEngine` at its native rate; `RealtimeAudioResampler` decimates to 24 kHz pcm16.                                                  |
-| First audio delta                                                                                          | First `assistantAudioDelta` event arrives in <2000 ms measured from the end of user speech. (User bar: "<2 s to first audio".)                                                                                                                                |
-| Assistant finishes speaking                                                                                | `assistantAudioDone` then `assistantTextDone` events. Full assistant text appears in the chat pane under the same `sessionKey`.                                                                                                                               |
-| Send a follow-up that would call a tool ("read ~/README.md")                                               | `toolCallStarted("read")` event arrives. Within 100-500 ms, `toolCallFinished("read", ok: true)`. Assistant speaks the result.                                                                                                                                |
-| Try a voice-disabled tool ("run the tests")                                                                | `toolCallStarted("exec")` fires, then `toolCallFinished("exec", ok: true)` — `ok: true` because the spoken hint is a deterministic response, not an error. Assistant speaks: "For that I'd need to run exec. Easiest to switch to chat and I'll do it there." |
-| Kill the app mid-turn (simulate `app_background` / simulator home)                                         | Runtime sends `session.end("app_background")`. Gateway closes the WS with 4020. `onClosed("session_ended", 4020)` fires.                                                                                                                                      |
-| Start a second voice run from a separate simulator instance against the same agent                         | First run receives `closed("replaced_by_newer", 4010)`. `onClosed(_, 4010)` fires.                                                                                                                                                                            |
+| step                                                                                         | expected observation                                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Open app, tap the Voice tab, enable Talk Mode                                                | Orb goes from `Offline` -> `Listening`. Gateway WS connected (status pill green). Diagnostic log shows `talk realtime-bridge: session started` (NOT Tier 1 "listening").                  |
+| First frame round-trip                                                                       | `talk realtime-bridge: session.ready voiceRunId=<uuid> sessionKey=agent:main:main` in the gateway log within ~300 ms.                                                                     |
+| Speak "what day is today?"                                                                   | Partial + final user transcript events surface within ~200 ms of speech end. AEC prevents the assistant's own TTS from re-triggering the VAD (voiceChat mode + `AUVoiceProcessingIO`).    |
+| First audio delta                                                                            | First `assistantAudioDelta` arrives in <2000 ms measured from final user transcript.                                                                                                      |
+| Follow-up: "read the top-level README"                                                       | `toolCallStarted("read")` -> gateway executes `read` against workspaceDir -> `toolCallFinished("read", ok: true)` -> assistant speaks the first few lines.                                |
+| Voice-disabled tool attempt: "run the tests"                                                 | `toolCallStarted("exec")` -> gateway returns the spoken-hint `function_call_output` -> assistant speaks: "For that I'd need to run exec. Easiest to switch to chat and I'll do it there." |
+| Barge-in: speak over the assistant mid-reply                                                 | `response.cancel` frame sent; assistant audio stops within ~150 ms; `.isSpeaking` flips to `false`.                                                                                       |
+| Background the app for 10 s, foreground                                                      | Runtime tears down on background. On foreground, `resumeAfterBackground()` re-dials; new `voiceRunId`. Gateway evicts the prior run with `replaced_by_newer` (4010).                      |
+| Gateway-side session history                                                                 | `openclaw sessions history agent:main:main` shows voice turns interleaved with any prior text turns, matching the design-doc contract (voice + text share one session key).               |
+| Flip flag: `openclaw config set talk.providers.openai.realtimeBridge false` then reopen Talk | On next Talk Mode entry, the splice branch is skipped; Tier 1 STT + TTS path owns the loop. No `realtime-bridge` logs in the gateway; no mic-tap installation failures.                   |
 
 ### Pass criteria
 
 - Every checked row lands without manual intervention.
-- First-audio latency is <2000 ms measured from final partial-
-  transcript event to first `assistantAudioDelta`.
-- Gateway session history (`openclaw sessions history agent:main:main`
-  on the VM) shows the voice turns interleaved with any prior text
-  turns, matching the design-note contract (voice and text share one
-  session key).
+- First-audio latency is <2000 ms measured from final user transcript
+  event to first `assistantAudioDelta`.
+- No regressions in the Tier 1 path when `realtimeBridge` is flipped
+  off.
+- `logger.info` and `GatewayDiagnostics.log` output for
+  `talk realtime-bridge: session started`, `session.ready`,
+  `tool.started`, `tool.finished`, `closed` each appear at least
+  once during the run.
 
-## What this does not prove
+## What the simulator still does not prove
 
-The simulator path does NOT prove:
+Even a successful simulator run does NOT prove:
 
 1. Real-device microphone routing and AEC behavior. `AVAudioSession
-.voiceChat` mode behaves differently on device vs. simulator; echo
-   cancellation is device-only.
+.voiceChat` activates `AUVoiceProcessingIO` on device; simulator
+   input is cleaner and sidesteps the echo loop the voice-chat mode
+   exists to fix. Barge-in quality is a real-device question.
 2. Tailscale funnel stability under mobile-network switching. The
-   simulator uses the Mac's network; a real device on LTE is a
-   different latency profile.
+   simulator uses the Mac's network; LTE is a different latency
+   profile.
 3. Battery / thermal impact on sustained realtime sessions.
-4. Barge-in quality (cutting the assistant off mid-speech). The
-   simulator mic path is clean; on device the assistant's own audio
-   picks up into the mic and VAD behavior changes.
+4. BLE / wired-headset route-change behavior mid-session.
 
-Items 1-4 are what the real-device TestFlight (commit 9) validates.
+Items 1-4 are what the real-device TestFlight (commit 13) validates.
 
-## Runtime integration status
+## Runtime integration status (post commit 10)
 
-Commit 7 ships the `TalkRealtimeSessionRuntime` standalone but does
-NOT yet wire it into `TalkModeManager`'s 2200-LOC state machine. The
-simulator smoke above assumes an in-app debug button that instantiates
-the runtime directly. `TalkModeManager` integration is intentionally
-deferred to a post-TestFlight follow-up because:
-
-- A broken mic-tap splice is invisible without a real-device round-
-  trip; wiring the runtime into the manager without first proving the
-  gateway bridge works end-to-end risks a regression in Tier 1 that
-  would be hard to bisect.
-- The manager's current Tier 1 STT + TTS flow remains the default for
-  shipped users until the bridge is proven on TestFlight.
-- The runtime's public `Delegate` surface is already the contract the
-  manager will consume, so the integration commit is additive.
+- `TalkModeManager.start()` now branches on `realtimeBridgeEnabled`:
+  when true and the gateway is reachable, it installs the realtime
+  mic tap, dials `/talk/realtime` via the gateway, and routes assistant
+  audio into the `PCMStreamingAudioPlayer` bus. On unrecoverable
+  error, `realtimeDegraded` flips and the same `start()` falls through
+  to the Tier 1 path.
+- `stop()` and `suspendForBackground()` both tear the realtime
+  session down so no stale WS survives the transition.
+- The runtime's `Delegate` is wired in `makeRealtimeDelegate()`:
+  transcripts update `lastTranscript`, assistant text deltas extend
+  `lastSpokenText`, assistant audio chunks flow through the feeder,
+  tool-call events are logged and diagnostics'd, fallback events are
+  logged, unrecoverable errors trigger degrade + re-entry into Tier 1.
+- Default behavior: the flag is **off** by default
+  (`talk.providers.*.realtimeBridge` defaults to false in the zod
+  schema), so every shipped user keeps Tier 1 unchanged until the
+  gateway operator explicitly flips it.
 
 ## References
 
@@ -131,3 +182,5 @@ deferred to a post-TestFlight follow-up because:
 - Gateway protocol (TypeScript): `src/gateway/talk-realtime/protocol.ts`.
 - iOS transport (Swift): `apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayRealtimeTransport.swift`.
 - iOS runtime (Swift): `apps/ios/Sources/Voice/TalkRealtimeSessionRuntime.swift`.
+- iOS splice + tests: `apps/ios/Sources/Voice/TalkModeManager.swift` (realtime-bridge block) + `apps/ios/Tests/TalkModeRealtimeSpliceTests.swift`.
+- Schema config keys: `src/config/zod-schema.ts` (`TalkProviderEntrySchema`), `src/config/schema.labels.ts`, `src/config/schema.help.ts`.
