@@ -110,9 +110,14 @@ The `sessionKey` uses the agent's configured `session.mainKey`; when unset,
 it falls back to `"main"` (the `DEFAULT_MAIN_KEY` constant in
 `src/routing/session-key.ts`), producing the shape `agent:<agentId>:main`.
 
-The ticket is single-use, bound to the operator's connect client id, and only
-valid for opening a WS to `/talk/realtime`. This keeps the control plane socket
-free for `talk.mode` / `sessions.*` / `chat.*` and isolates realtime lifetimes.
+The ticket is single-use, 60 s TTL, and only valid for opening a WS to
+`/talk/realtime`. The gateway does not expose its internal `connId` to
+clients, so the upgrade handler validates only the ticket (secrecy + TTL
+
+- single-use). The originating operator `connId` is stored on the ticket
+  for diagnostics but is not re-checked at redeem time. This keeps the
+  control plane socket free for `talk.mode` / `sessions.*` / `chat.*` and
+  isolates realtime lifetimes.
 
 ### Realtime WS: `wss://<gateway>/talk/realtime?ticket=<t>`
 

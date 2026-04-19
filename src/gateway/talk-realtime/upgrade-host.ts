@@ -61,15 +61,6 @@ export type TalkRealtimeHostDeps = {
   ticketRegistry: TalkRealtimeTicketRegistry;
   voiceRunRegistry: VoiceRunRegistry;
   bridgeFactory: TalkRealtimeBridgeFactory;
-  /**
-   * Optional: the connect id of the WS client peer. The upgrade host
-   * delegates bearer-context resolution to the caller because WS
-   * handshake auth already happens on the main gateway socket; for the
-   * realtime host we rely solely on the ticket. The connId check
-   * happens inside the ticket redemption — so this callback is only
-   * used for diagnostics and logging.
-   */
-  resolveOperatorConnId?: (req: IncomingMessage) => string | undefined;
   /** Injected for tests. */
   webSocketServerClass?: typeof WebSocketServer;
   /** Optional logging hook. Keep dependency-free for testability. */
@@ -92,18 +83,14 @@ export function createTalkRealtimeHost(deps: TalkRealtimeHostDeps): TalkRealtime
       return false;
     }
     const ticketParam = url.searchParams.get("ticket") ?? "";
-    const operatorConnIdHeader = parseConnIdHeader(req.headers["x-openclaw-connid"]);
-    const operatorConnId = operatorConnIdHeader ?? deps.resolveOperatorConnId?.(req) ?? "";
-    if (!ticketParam || !operatorConnId) {
-      writeUpgradeRejection(socket, 401, "missing ticket or connId");
+    if (!ticketParam) {
+      writeUpgradeRejection(socket, 401, "missing ticket");
       return true;
     }
 
-    const redemption = deps.ticketRegistry.redeem(ticketParam, operatorConnId);
+    const redemption = deps.ticketRegistry.redeem(ticketParam);
     if (!redemption.ok) {
-      const code =
-        redemption.reason === "expired" ? 401 : redemption.reason === "wrong_operator" ? 403 : 401;
-      writeUpgradeRejection(socket, code, `ticket ${redemption.reason}`);
+      writeUpgradeRejection(socket, 401, `ticket ${redemption.reason}`);
       return true;
     }
     const ticket = redemption.ticket;
@@ -245,16 +232,6 @@ async function attachClientWs(
     });
     teardown("bridge_error");
   }
-}
-
-function parseConnIdHeader(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) {
-    return value[0];
-  }
-  if (typeof value === "string" && value.length > 0) {
-    return value;
-  }
-  return undefined;
 }
 
 function writeUpgradeRejection(socket: Duplex, status: number, message: string): void {

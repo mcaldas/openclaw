@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 /**
  * In-memory ticket registry for `/talk/realtime` upgrades.
@@ -9,16 +9,18 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
  * - Single-use: redeeming a ticket consumes it.
  * - Short-lived: tickets expire after `ttlMs` (default 60 s) and expired
  *   tickets are pruned lazily on reads and on `sweep()`.
- * - Bound to an operator connect id: only the client that asked for the
- *   ticket can redeem it. The upgrade handler is responsible for looking
- *   up the connect id from the WS handshake ticket-bearer context before
- *   calling `redeem`.
  * - Bound to an agent + voice-run id: the registry is the source of truth
  *   for what agent the upgrade is for, so the WS handler does not trust
  *   untrusted query params beyond the ticket string.
  *
- * The ticket string itself is 32 bytes of base64url randomness; we compare
- * with `timingSafeEqual` to avoid timing side channels.
+ * The ticket string itself is 32 bytes of base64url randomness. The
+ * originating operator connect id is stored on the ticket for logging
+ * and diagnostics, but it is NOT checked at redeem time: the gateway
+ * does not expose its internal `connId` to clients, so iOS cannot
+ * supply it on the WS upgrade. Security rests on ticket secrecy + TTL
+ * + single-use semantics, which is sufficient for this threat model
+ * (operator is already authenticated at `talk.realtime.start`-issue
+ * time, and leaked tickets expire in 60 s).
  */
 export type TalkRealtimeTicket = {
   ticket: string;
@@ -39,7 +41,7 @@ export type RedeemResult =
   | { ok: true; ticket: TalkRealtimeTicket }
   | {
       ok: false;
-      reason: "unknown" | "expired" | "consumed" | "wrong_operator";
+      reason: "unknown" | "expired" | "consumed";
     };
 
 export type TalkRealtimeTicketRegistryOptions = {
@@ -82,11 +84,11 @@ export class TalkRealtimeTicketRegistry {
   }
 
   /**
-   * Redeem a ticket. Consumes the ticket on success; expired or wrong-
-   * operator tickets are dropped from the registry so a retry cannot
-   * succeed. Unknown tickets leave the registry untouched.
+   * Redeem a ticket. Consumes the ticket on success; expired tickets
+   * are dropped from the registry so a retry cannot succeed. Unknown
+   * tickets leave the registry untouched.
    */
-  redeem(ticket: string, operatorConnId: string): RedeemResult {
+  redeem(ticket: string): RedeemResult {
     const entry = this.entries.get(ticket);
     if (!entry) {
       return { ok: false, reason: "unknown" };
@@ -95,10 +97,6 @@ export class TalkRealtimeTicketRegistry {
     if (now >= entry.expiresAtMs) {
       this.entries.delete(ticket);
       return { ok: false, reason: "expired" };
-    }
-    if (!constantTimeEquals(entry.operatorConnId, operatorConnId)) {
-      this.entries.delete(ticket);
-      return { ok: false, reason: "wrong_operator" };
     }
     this.entries.delete(ticket);
     return { ok: true, ticket: entry };
@@ -130,13 +128,4 @@ export class TalkRealtimeTicketRegistry {
   _size(): number {
     return this.entries.size;
   }
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return timingSafeEqual(ab, bb);
 }

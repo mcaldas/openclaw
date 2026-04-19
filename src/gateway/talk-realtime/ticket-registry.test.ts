@@ -48,7 +48,7 @@ describe("TalkRealtimeTicketRegistry", () => {
     expect(ticket.issuedAtMs).toBe(1_000);
   });
 
-  it("redeems exactly once for the matching operator", () => {
+  it("redeems exactly once", () => {
     const { registry } = makeRegistry();
     const issued = registry.issue({
       voiceRunId: "run-1",
@@ -56,24 +56,10 @@ describe("TalkRealtimeTicketRegistry", () => {
       operatorConnId: "conn-1",
       sessionKey: "agent:main:default",
     });
-    const first = registry.redeem(issued.ticket, "conn-1");
+    const first = registry.redeem(issued.ticket);
     expect(first.ok).toBe(true);
-    const second = registry.redeem(issued.ticket, "conn-1");
+    const second = registry.redeem(issued.ticket);
     expect(second).toEqual({ ok: false, reason: "unknown" });
-  });
-
-  it("rejects a ticket redeemed by a different operator connection and drops it", () => {
-    const { registry } = makeRegistry();
-    const issued = registry.issue({
-      voiceRunId: "run-1",
-      agentId: "main",
-      operatorConnId: "conn-1",
-      sessionKey: "agent:main:default",
-    });
-    const attempt = registry.redeem(issued.ticket, "conn-2");
-    expect(attempt).toEqual({ ok: false, reason: "wrong_operator" });
-    const retry = registry.redeem(issued.ticket, "conn-1");
-    expect(retry).toEqual({ ok: false, reason: "unknown" });
   });
 
   it("rejects a ticket redeemed after its TTL expires", () => {
@@ -85,11 +71,11 @@ describe("TalkRealtimeTicketRegistry", () => {
       sessionKey: "agent:main:default",
     });
     ctx.advance(5_001);
-    const result = ctx.registry.redeem(issued.ticket, "conn-1");
+    const result = ctx.registry.redeem(issued.ticket);
     expect(result).toEqual({ ok: false, reason: "expired" });
     // Subsequent redemptions observe unknown because expired entries are
     // pruned lazily.
-    expect(ctx.registry.redeem(issued.ticket, "conn-1")).toEqual({
+    expect(ctx.registry.redeem(issued.ticket)).toEqual({
       ok: false,
       reason: "unknown",
     });
@@ -128,7 +114,7 @@ describe("TalkRealtimeTicketRegistry", () => {
     });
     expect(registry.peek(issued.ticket)).toBeDefined();
     expect(registry.peek(issued.ticket)).toBeDefined();
-    const redeemed = registry.redeem(issued.ticket, "conn-1");
+    const redeemed = registry.redeem(issued.ticket);
     expect(redeemed.ok).toBe(true);
   });
 });
