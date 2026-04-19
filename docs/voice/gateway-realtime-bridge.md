@@ -61,15 +61,17 @@ attempt.thread-helpers.ts`. The tool registry is plugin-owned through
 
 A voice session is an agent session with a distinct session kind.
 
-- Session key: `agent:<agentId>:main:voice:<uuid>` (appears in
-  `sessions.list` beside text sessions).
+- Session key: voice turns write into the agent's normal chat session (the
+  same `session.mainKey` text chat writes to) so `sessions.list` and
+  `sessions.history` show voice and text interleaved. The realtime WS uses a
+  separate ephemeral id (`voiceRunId`) for its own lifecycle tracking, but
+  that id is not a session key.
 - Persistence: turn transcripts land on the standard session sink so the
   session looks like a chat session. Audio frames are never persisted.
-- Lifecycle caps: 15 min wall-clock, 50 realtime turns, 3 MB buffered input
-  audio pre-`session.ready`. Any cap breach closes the WS with code 4009 and a
-  `session.end` event.
-- Multi-device: exactly one active voice session per agent at a time; a second
-  `talk.realtime.start` closes the prior session with code 4010.
+- Lifecycle caps: none enforced in v1. Ship without wall-clock / turn /
+  buffer caps; revisit if abuse shows up.
+- Multi-device: exactly one active voice run per agent at a time; a second
+  `talk.realtime.start` closes the prior run with code 4010.
 
 ## Transport
 
@@ -91,17 +93,14 @@ Response:
 
 ```json
 {
-  "sessionKey": "agent:main:voice:9b7c…",
+  "voiceRunId": "9b7c…",
+  "sessionKey": "agent:main:default",
   "ticket": "<short-lived jwt, 60s TTL>",
   "wsUrl": "wss://<gateway-host>/talk/realtime",
   "audio": {
     "sampleRateHz": 24000,
     "format": "pcm16",
     "channels": 1
-  },
-  "cap": {
-    "wallClockMs": 900000,
-    "maxTurns": 50
   }
 }
 ```
@@ -128,21 +127,21 @@ Client to gateway events:
 
 Gateway to client events:
 
-| event                                                 | payload                            |
-| ----------------------------------------------------- | ---------------------------------- |
-| `session.ready`                                       | `{ sessionKey, audio, cap }`       |
-| `response.audio.delta`                                | `{ audio: base64 pcm16 }`          |
-| `response.audio.done`                                 | `{ itemId }`                       |
-| `conversation.item.input_audio_transcription.partial` | `{ text }`                         |
-| `conversation.item.input_audio_transcription.final`   | `{ text }`                         |
-| `response.output_text.delta`                          | `{ text }`                         |
-| `response.output_text.done`                           | `{ text }`                         |
-| `response.tool_call.started`                          | `{ callId, name }`                 |
-| `response.tool_call.finished`                         | `{ callId, name, durationMs, ok }` |
-| `fallback.activated`                                  | `{ from, to, reason }`             |
-| `error`                                               | `{ code, message, recoverable }`   |
-| `closed`                                              | `{ reason, code }`                 |
-| `ping`                                                | `{ ts }`                           |
+| event                                                 | payload                             |
+| ----------------------------------------------------- | ----------------------------------- |
+| `session.ready`                                       | `{ voiceRunId, sessionKey, audio }` |
+| `response.audio.delta`                                | `{ audio: base64 pcm16 }`           |
+| `response.audio.done`                                 | `{ itemId }`                        |
+| `conversation.item.input_audio_transcription.partial` | `{ text }`                          |
+| `conversation.item.input_audio_transcription.final`   | `{ text }`                          |
+| `response.output_text.delta`                          | `{ text }`                          |
+| `response.output_text.done`                           | `{ text }`                          |
+| `response.tool_call.started`                          | `{ callId, name }`                  |
+| `response.tool_call.finished`                         | `{ callId, name, durationMs, ok }`  |
+| `fallback.activated`                                  | `{ from, to, reason }`              |
+| `error`                                               | `{ code, message, recoverable }`    |
+| `closed`                                              | `{ reason, code }`                  |
+| `ping`                                                | `{ ts }`                            |
 
 Rationale: this is intentionally a thin subset of OpenAI realtime so an iOS
 adapter can map between them with a small lookup. Tool execution, memory
@@ -191,17 +190,23 @@ Tools whose schemas cannot be losslessly expressed in the OpenAI realtime
 inputs) are dropped and a gateway-side warning is logged. Voice mode never
 auto-adds tools that text mode does not have.
 
-A memory snapshot is injected as a final `conversation.item.create` before the
-first `response.create`:
+A memory snapshot is injected once, as a single `conversation.item.create`
+before the first `response.create`, at session start only. It is never
+re-injected on subsequent turns.
+
+Sources:
 
 - `memory-core` active summary (most recent agent-chosen summary).
-- Recent session history: last 6 text turns from the matching agent's default
-  text session, rendered as alternating user/assistant `conversation.item`
-  entries with text-only content.
+- `lossless-claw` conversation-history compression output for the matching
+  agent's default text session (recent-history compression, not full rewind).
 
-Size budget: 4 KB for the memory summary + 8 KB for recent history, measured
-by character count not tokens, to keep the first `response.create` latency
-predictable. If budgets are exceeded, history is trimmed oldest-first.
+Explicitly excluded: `active-memory`. Its per-turn cost on this user's
+workload is 20-30 s and it returns empty summaries; spending that latency
+once at session start produces no useful signal for voice.
+
+Size budget: 4 KB for the memory summary + 8 KB for compressed history,
+measured by character count not tokens. If budgets are exceeded, compressed
+history is trimmed oldest-first.
 
 ## Tool dispatch
 
@@ -237,16 +242,25 @@ message }` so the realtime model can decide how to recover; the WS client sees
 the tool implementation throws) close the realtime session with code 4011 and
 an `error` frame.
 
-Auth: the voice session inherits the same `senderIsOwner`, ambient scope, and
-`tools.disabledForVoice` deny list that the agent already exposes. Tools that
-require an interactive approval prompt are disabled in voice mode (they have
-no UI to display the prompt), and the bridge announces that in
-`session.ready.disabledTools`.
+Auth: the voice session inherits the same `senderIsOwner` and ambient scope
+the agent already exposes. Tools that require an interactive approval prompt
+are disabled in voice mode (they have no UI to display the prompt). The
+bridge does NOT surface a deny list to the client; instead, when the
+realtime model tries to call a disabled tool, the gateway returns a
+function-call output of the shape:
 
-Decision to confirm: should approval-required tools instead be routed to the
-companion text channel (Control UI or iOS chat pane) so the user can approve
-there while the voice session waits? This is out of scope for the first
-gateway bridge cut but should be prototyped next.
+```json
+{
+  "error": "approval_required",
+  "message": "For that I'd need to run <toolName>. Easiest to switch to chat and I'll do it there.",
+  "spokenHint": true
+}
+```
+
+The `spokenHint: true` marker tells the realtime model to paraphrase the
+`message` field in the next spoken turn rather than invent its own wording.
+This is the v1 UX: a verbal nudge instead of companion-channel approval
+plumbing.
 
 ## Fallback
 
@@ -263,18 +277,17 @@ if the fallback fails, the session closes.
 
 ## Session caps and safety
 
-- Hard cap: 15 min wall-clock, 50 realtime turns, 3 MB buffered pre-`session.ready`.
-- Soft cap: after 10 min, emit a `cap.warning` event with remaining time; iOS
-  overlay displays a timer.
-- Cost cap: per-agent daily USD budget read from `talk.providers[openai].dailyUsdBudget`.
-  When the running session's projected cost crosses the budget, the gateway
-  emits `cap.warning` and, after 30 s, `closed` with reason `budget_exceeded`.
-- Rate limit: one voice session per operator, one per agent. Second start
-  closes the first.
+No caps in v1. Ship without wall-clock / turn / buffered-audio limits and
+without per-agent daily budgets. Revisit if abuse shows up.
+
+Rate limit: one active voice run per agent. A second `talk.realtime.start`
+closes the prior run with code 4010. This is for correctness (two realtime
+WSs writing to the same chat session would interleave turns), not abuse
+prevention.
 
 ## Config surface
 
-One new config key (plus existing `talk.providers[openai].*`):
+Config surface (additions to `talk.providers[openai].*`):
 
 ```jsonc
 {
@@ -286,7 +299,6 @@ One new config key (plus existing `talk.providers[openai].*`):
         "realtimeModelFallback": "gpt-realtime",
         "realtimeApiVersion": "2025-04-01-preview",
         "voiceId": "alloy",
-        "dailyUsdBudget": 5,
       },
     },
   },
@@ -295,14 +307,22 @@ One new config key (plus existing `talk.providers[openai].*`):
 
 `realtimeBridge` is `false` by default; when true, `talk.realtime.start`
 returns a valid ticket and iOS uses the gateway transport. When false, iOS
-falls back to the existing Tier 1 discrete path. The direct-to-Azure Tier 2
-path is disabled by default in the gateway-bridge build; it remains available
-as a debug flag for bisecting regressions.
+falls back to the existing Tier 1 discrete path.
+
+The direct-to-Azure Tier 2 path is DELETED once the bridge lands in
+TestFlight (see "Tier 2 retirement" below); it is not kept behind a debug
+flag.
+
+Removed keys (previously shipped on the Tier 2 branch, replaced by this
+surface): `enableRealtime`, `realtimeModel` (Tier 2 semantics),
+`realtimeModelFallbacks`, `realtimeInstructions`. The retirement commit
+drops them from the gateway config with a `legacy.migrations` entry so
+existing configs continue to load.
 
 Schema drift: adding `realtimeBridge`, `realtimeModel`,
-`realtimeModelFallback`, `realtimeApiVersion`, and `dailyUsdBudget` to the
-config schema / help surfaces requires regenerating the config docs drift
-hash (`pnpm config:docs:gen`) in the same commit that adds the fields.
+`realtimeModelFallback`, and `realtimeApiVersion` to the config schema /
+help surfaces requires regenerating the config docs drift hash
+(`pnpm config:docs:gen`) in the same commit that adds the fields.
 
 ## iOS adapter
 
@@ -358,28 +378,50 @@ iOS tests:
   existing `OpenAIRealtimeVoiceSessionEvent` enum.
 - Ticket parsing and reconnect-with-refresh.
 
-## Open questions (need explicit answers before implementation)
+## Decisions (resolved)
 
-- **Memory snapshot source of truth.** Should we use `memory-core`'s active
-  summary only, or also splice in `active-memory` working state? The design
-  above proposes summary-only for a tighter size budget, but the brief
-  mentions both.
-- **Voice-mode tool deny list.** Do approval-required tools get silently
-  disabled, routed to a companion text channel for approval, or errored with
-  a "please approve in chat" response? Above defaults to silently disabled
-  with a `session.ready.disabledTools` hint; this is the safest default for
-  v1 but may feel broken.
-- **Session cap defaults.** 15 min wall-clock, 50 turns, $5/day per-agent
-  budget. All three are placeholders; confirm or override before landing the
-  schema commit.
-- **Companion text session.** When a voice session is active, should the iOS
-  chat pane show the voice turns in real time (same session key), or keep
-  voice sessions private and stitched into history only at close? The
-  session-key plan assumes the former.
-- **Direct-to-Azure flag.** After the bridge ships, do we remove the direct
-  Tier 2 transport entirely, or keep it behind a hidden debug flag for
-  troubleshooting? Above keeps it behind a debug flag for the first release,
-  then removes it one release later.
+- **Memory snapshot source.** `memory-core` summary + `lossless-claw`
+  compressed history, at session start only. `active-memory` is excluded
+  (20-30 s per-turn cost with empty output on this user's workload).
+- **Approval-required tools.** Silent-disable with a verbal nudge routed
+  through the spoken reply. No companion-channel approval plumbing in v1.
+- **Session caps.** None in v1. Ship without wall-clock / turn / budget
+  enforcement.
+- **Companion text session.** Voice turns write into the normal chat session
+  history; `sessions.list` and `sessions.history` surface them uniformly.
+  There is no separate "voice session" key; the realtime WS uses an
+  ephemeral `voiceRunId` for its own lifecycle only.
+- **Tier 2 direct-to-Azure path.** Deleted after the bridge lands in
+  TestFlight. Reusable iOS pieces (audio resampler, `.voiceChat` session
+  config, PCM player, reconnect policy tests, `TalkSettingsDisplay`, splice
+  tests, runtime facade) are cherry-picked onto this branch before the Tier
+  2 transport is dropped. Direct-WSS transport, `VoiceProviderEndpoints
+.build(capability: .realtime)`, Azure URL/header XCTests, iOS-side
+  fallback ordering, and the `enableRealtime` / `realtimeModel` /
+  `realtimeModelFallbacks` / `realtimeInstructions` gateway config keys are
+  all removed.
+
+## Tier 2 retirement
+
+After the gateway bridge lands in TestFlight (commit 8), the Tier 2
+direct-to-Azure transport is removed in a follow-up commit on this branch:
+
+1. Delete `OpenAIRealtimeVoiceSession` (direct WSS transport), its Azure URL
+   builder in `VoiceProviderEndpoints`, and the direct-WSS Azure
+   URL/header XCTests.
+2. Drop iOS-side realtime fallback ordering (gateway owns provider choice).
+3. Remove gateway config keys `enableRealtime`, `realtimeModel` (Tier 2
+   semantics), `realtimeModelFallbacks`, `realtimeInstructions`. Add a
+   `legacy.migrations` entry so existing configs continue to load and
+   `openclaw doctor --fix` repairs stale config files.
+4. Regenerate config docs drift hash.
+
+The cherry-picked pieces from the Tier 2 branch are retained:
+`RealtimeAudioResampler`, `PCMStreamingAudioPlayer`, `TalkModeManager`'s
+AVAudioSession `.voiceChat` + AEC setup, `TalkRealtimeSessionRuntime`
+(retargeted at the new transport), barge-in wiring (mapped to the new
+cancel event), `RealtimeReconnectPolicyTests`, `RealtimeAudioResamplerTests`,
+`TalkSettingsDisplay`, and the splice tests in `TalkModeRealtimeSpliceTests`.
 
 ## Landing order
 
@@ -388,17 +430,21 @@ next commit starts.
 
 1. This design note.
 2. Gateway WS bridge skeleton: `talk.realtime.start` RPC, `/talk/realtime`
-   handler, ticket issuance, audio format parameter on the existing OpenAI
-   realtime provider, session caps, closed-code set. No tool dispatch yet;
-   the bridge forwards audio and transcripts only.
-3. Tool registry marshalling + system prompt + memory snapshot injection on
-   `session.update`. Pure composition, deterministic ordering, size budgets
-   enforced.
+   handler, ticket issuance, pcm16 audio format parameter on the existing
+   OpenAI realtime provider, closed-code set, duplicate-run eviction. No
+   tool dispatch and no memory injection yet; the bridge forwards audio and
+   transcripts only.
+3. Tool registry marshalling + system prompt composition + memory snapshot
+   injection (`memory-core` + `lossless-claw`) on `session.update`.
+   Deterministic ordering, size budgets enforced.
 4. Tool call dispatch through the agent tool registry with parallel-call
-   tracking and error classification.
+   tracking, approval-required verbal-nudge response, and error
+   classification.
 5. iOS `GatewayRealtimeTransport` adapter + unit tests.
-6. iOS runtime switch: feature-flag gated transport swap in
-   `TalkRealtimeSessionRuntime`. Keeps the direct transport behind a debug
-   flag.
+6. iOS runtime switch: `TalkRealtimeSessionRuntime` re-targeted at the
+   gateway transport. Direct-to-Azure transport still present; feature flag
+   selects between them for bisecting during the cut.
 7. Simulator smoke log + real-device verification plan update.
 8. TestFlight submission.
+9. (Post-TestFlight) Tier 2 retirement commit per "Tier 2 retirement"
+   section.
