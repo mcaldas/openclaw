@@ -47,6 +47,20 @@ final class TalkModeManager: NSObject {
     var gatewayTalkApiKeyConfigured: Bool = false
     var gatewayTalkDefaultModelId: String?
     var gatewayTalkDefaultVoiceId: String?
+    /// Cached copy of the gateway's top-level `talk` config block (bridged to
+    /// `AnyCodable`). Used by the Settings panel to render the full multi-
+    /// provider display. Nil until the first successful `talk.config` pull.
+    private var gatewayTalkRawConfig: [String: AnyCodable]?
+
+    /// Structured display for the Settings -> Advanced -> Talk Voice panel. Built
+    /// lazily from the cached raw talk dict so the Settings view doesn't need to
+    /// re-parse the payload itself. Always returns a valid struct even before the
+    /// first config load (fields are nil / "Not loaded" in that state).
+    var gatewayTalkSettingsDisplay: TalkSettingsDisplay {
+        TalkSettingsDisplayBuilder.build(
+            talk: self.gatewayTalkRawConfig,
+            configLoaded: self.gatewayTalkConfigLoaded)
+    }
 
     private enum CaptureMode {
         case idle
@@ -2544,6 +2558,12 @@ extension TalkModeManager {
             self.gatewayTalkDefaultModelId = self.defaultModelId
             self.gatewayTalkApiKeyConfigured = (self.apiKey?.isEmpty == false)
             self.gatewayTalkConfigLoaded = true
+            // Cache the bridged talk block so the Settings panel can render the
+            // multi-provider display without re-requesting `talk.config`. Note:
+            // `config` is the whole gateway config envelope; the talk block
+            // lives at `config.talk`.
+            self.gatewayTalkRawConfig = TalkConfigParsing
+                .bridgeFoundationDictionary(config["talk"] as? [String: Any])
             if let interrupt = parsed.interruptOnSpeech {
                 self.interruptOnSpeech = interrupt
             }
@@ -2561,6 +2581,7 @@ extension TalkModeManager {
             self.gatewayTalkDefaultModelId = nil
             self.gatewayTalkApiKeyConfigured = false
             self.gatewayTalkConfigLoaded = false
+            self.gatewayTalkRawConfig = nil
             self.silenceWindow = TimeInterval(Self.defaultSilenceTimeoutMs) / 1000
             self.providerSurface = nil
         }

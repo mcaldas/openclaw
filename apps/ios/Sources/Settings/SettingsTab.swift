@@ -334,23 +334,21 @@ struct SettingsTab: View {
                                 Text("Talk Voice (Gateway)")
                                     .font(.footnote.weight(.semibold))
                                     .foregroundStyle(.secondary)
-                                LabeledContent("Provider", value: "ElevenLabs")
+                                let talkDisplay = self.appModel.talkMode.gatewayTalkSettingsDisplay
+                                LabeledContent("Provider", value: talkDisplay.providerLabel)
                                 LabeledContent(
                                     "API Key",
-                                    value: self.appModel.talkMode.gatewayTalkConfigLoaded
-                                        ? (
-                                            self.appModel.talkMode.gatewayTalkApiKeyConfigured
-                                                ? "Configured"
-                                                : "Not configured"
-                                        )
-                                        : "Not loaded")
+                                    value: Self.apiKeyDisplay(configured: talkDisplay.apiKeyConfigured))
                                 LabeledContent(
                                     "Default Model",
-                                    value: self.appModel.talkMode.gatewayTalkDefaultModelId ?? "eleven_v3 (fallback)")
+                                    value: talkDisplay.defaultModelId ?? "—")
                                 LabeledContent(
                                     "Default Voice",
-                                    value: self.appModel.talkMode.gatewayTalkDefaultVoiceId ?? "auto (first available)")
-                                Text("Configured on gateway via talk.apiKey, talk.modelId, and talk.voiceId.")
+                                    value: talkDisplay.defaultVoiceId ?? "—")
+                                if let realtimeModel = talkDisplay.realtimeModelId {
+                                    LabeledContent("Realtime Model", value: realtimeModel)
+                                }
+                                Text(talkDisplay.hintText)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                             }
@@ -889,6 +887,16 @@ struct SettingsTab: View {
             port: port,
             timeoutSeconds: timeoutSeconds,
             queueLabel: "gateway.preflight")
+    }
+
+    /// Map the three-state API key flag into user-facing copy. Nil = "config hasn't
+    /// loaded yet"; false = "loaded but no key"; true = "configured".
+    static func apiKeyDisplay(configured: Bool?) -> String {
+        switch configured {
+        case .none: return "Not loaded"
+        case .some(true): return "Configured"
+        case .some(false): return "Not configured"
+        }
     }
 
     // (GatewaySetupCode) decode raw setup codes.
