@@ -225,6 +225,14 @@ public actor GatewayChannelActor {
 
     public func authSource() -> GatewayAuthSource { self.lastAuthSource }
 
+    /// Base URL of the main gateway WebSocket. Exposed so adjacent
+    /// transports (e.g. the realtime voice bridge at `/talk/realtime`)
+    /// can build sibling URLs against the same host without
+    /// re-discovering the gateway endpoint. Returns `nil` if the
+    /// channel is operating on a non-URL scheme (defensive; real
+    /// callers always pass an `http(s)`/`ws(s)` URL).
+    public func gatewayBaseURL() -> URL { self.url }
+
     public func shutdown() async {
         self.shouldReconnect = false
         self.connected = false

@@ -323,6 +323,15 @@ public actor GatewayNodeSession {
         return "\(host):\(port)"
     }
 
+    /// URL of the currently active gateway WebSocket. Exposed for
+    /// sibling transports (e.g. the realtime voice bridge) that need to
+    /// build URLs against the same host without re-discovering the
+    /// gateway endpoint. Returns `nil` before the first successful
+    /// `connect()`.
+    public func currentGatewayURL() -> URL? {
+        self.activeURL
+    }
+
     public func sendEvent(event: String, payloadJSON: String?) async {
         guard let channel = self.channel else { return }
         let params: [String: AnyCodable] = [

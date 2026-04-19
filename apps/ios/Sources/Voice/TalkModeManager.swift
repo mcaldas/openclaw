@@ -96,6 +96,30 @@ final class TalkModeManager: NSObject {
     var pcmPlayer: PCMStreamingAudioPlaying = PCMStreamingAudioPlayer.shared
     var mp3Player: StreamingAudioPlaying = StreamingAudioPlayer.shared
 
+    // MARK: - Gateway realtime bridge state.
+    //
+    // Populated by `reloadConfig()` from `talk.providers.<id>.realtimeBridge`.
+    // When `realtimeBridgeEnabled` is true AND `realtimeDegraded` is false,
+    // `start()` takes the bridge path (duplex WS to the gateway's
+    // `/talk/realtime`); otherwise Tier 1 STT + TTS handles the loop. A
+    // transient bridge error flips `realtimeDegraded` so we don't thrash
+    // reconnecting into a dead socket during the same Talk Mode entry.
+    private var realtimeBridgeEnabled: Bool = false
+    private var realtimeActive = false
+    private var realtimeDegraded = false
+    private let talkRealtimeRuntime = TalkRealtimeSessionRuntime()
+    private var realtimeResampler: RealtimeAudioResampler?
+    /// Continuation used to push PCM16 24 kHz audio chunks received from the
+    /// realtime session into `pcmPlayer`. Nil until the first assistant audio
+    /// chunk arrives; torn down on session close or on barge-in.
+    private var realtimeAudioFeed: AsyncThrowingStream<Data, Error>.Continuation?
+    private var realtimePlaybackTask: Task<Void, Never>?
+    /// Test hook: when non-nil, `start()` skips the real ticket RPC and uses
+    /// this issuer. Also bypasses the real WS factory via `realtimeWsFactoryOverride`.
+    var realtimeTicketIssuerOverride: GatewayRealtimeTicketIssuing?
+    /// Test hook: scripted `RealtimeWebSocket` factory for the bridge transport.
+    var realtimeWsFactoryOverride: (@Sendable (URL, [String: String]) -> RealtimeWebSocket)?
+
     private var gateway: GatewayNodeSession?
     private var gatewayConnected = false
     private var silenceWindow: TimeInterval = TimeInterval(TalkModeManager.defaultSilenceTimeoutMs) / 1000
@@ -190,6 +214,37 @@ final class TalkModeManager: NSObject {
         }
 
         await self.reloadConfig()
+        // Realtime bridge: when the gateway's provider surface opts in
+        // and we have a reachable gateway, run the full-duplex WS loop
+        // against `/talk/realtime` instead of Tier 1 STT + TTS. A
+        // transient failure flips `realtimeDegraded` so we do not dial
+        // into a dead loop — Tier 1 takes over for the rest of this
+        // Talk Mode entry. The flag is re-read on every entry via
+        // `reloadConfig()`, so one gateway-side config flip is all it
+        // takes to bring the bridge back after a degrade.
+        if !self.realtimeDegraded, self.realtimeBridgeEnabled, self.gateway != nil {
+            do {
+                try Self.configureRealtimeAudioSession()
+                self.captureMode = .continuous
+                try await self.startRealtimeBridge()
+                self.isListening = true
+                self.realtimeActive = true
+                self.statusText = "Listening"
+                self.startSilenceMonitor()
+                await self.subscribeChatIfNeeded(sessionKey: self.mainSessionKey)
+                self.logger.info("listening (realtime-bridge)")
+                GatewayDiagnostics.log("talk realtime-bridge: session started")
+                return
+            } catch {
+                self.realtimeDegraded = true
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: start failed error=\(error.localizedDescription); degrading to tier 1")
+                self.logger.error(
+                    "realtime-bridge start failed: \(error.localizedDescription, privacy: .public); degrading")
+                await self.tearDownRealtimeSession()
+                // Fall through to Tier 1 startup below.
+            }
+        }
         do {
             try Self.configureAudioSession()
             // Set this before starting recognition so any early speech errors are classified correctly.
@@ -217,6 +272,12 @@ final class TalkModeManager: NSObject {
         self.lastHeard = nil
         self.silenceTask?.cancel()
         self.silenceTask = nil
+        // Reset the degrade flag so a subsequent enable re-enters the
+        // realtime bridge when the feature flag + config still say so.
+        self.realtimeDegraded = false
+        Task { @MainActor [weak self] in
+            await self?.tearDownRealtimeSession()
+        }
         self.stopRecognition()
         self.stopSpeaking()
         self.lastInterruptedAtSeconds = nil
@@ -262,6 +323,13 @@ final class TalkModeManager: NSObject {
         self.silenceTask?.cancel()
         self.silenceTask = nil
 
+        // Background tears down the realtime bridge so we do not hold a
+        // stale WS while the app is suspended. Talk Mode state (`isEnabled`)
+        // stays untouched, so `resumeAfterBackground()` can re-enter and
+        // re-dial if the flag is still set.
+        Task { @MainActor [weak self] in
+            await self?.tearDownRealtimeSession()
+        }
         self.stopRecognition()
         self.stopSpeaking()
         self.lastInterruptedAtSeconds = nil
@@ -2020,13 +2088,17 @@ extension TalkModeManager {
             self.gatewayTalkDefaultModelId = self.defaultModelId
             self.gatewayTalkApiKeyConfigured = (self.apiKey?.isEmpty == false)
             self.gatewayTalkConfigLoaded = true
+            // Capture the realtime-bridge flag. We read it from every
+            // `reloadConfig()` so a gateway-side flip propagates on the
+            // next Talk Mode entry without an app restart.
+            self.realtimeBridgeEnabled = parsed.realtimeBridgeEnabled
             if let interrupt = parsed.interruptOnSpeech {
                 self.interruptOnSpeech = interrupt
             }
             self.silenceWindow = TimeInterval(parsed.silenceTimeoutMs) / 1000
             if parsed.normalizedPayload || parsed.defaultVoiceId != nil || parsed.rawConfigApiKey != nil {
                 GatewayDiagnostics.log(
-                    "talk config provider=\(activeProvider) silenceTimeoutMs=\(parsed.silenceTimeoutMs)")
+                    "talk config provider=\(activeProvider) silenceTimeoutMs=\(parsed.silenceTimeoutMs) realtimeBridge=\(parsed.realtimeBridgeEnabled)")
             }
         } catch {
             self.defaultModelId = Self.defaultModelIdFallback
@@ -2037,8 +2109,410 @@ extension TalkModeManager {
             self.gatewayTalkDefaultModelId = nil
             self.gatewayTalkApiKeyConfigured = false
             self.gatewayTalkConfigLoaded = false
+            self.realtimeBridgeEnabled = false
             self.silenceWindow = TimeInterval(Self.defaultSilenceTimeoutMs) / 1000
         }
+    }
+
+    // MARK: - Realtime bridge splice.
+    //
+    // The realtime-bridge path replaces the SFSpeechRecognizer + HTTP
+    // TTS flow with a single bidirectional WebSocket session hosted by
+    // the gateway. Microphone buffers are resampled to 24 kHz PCM16 and
+    // streamed out as `input_audio_buffer.append`; assistant audio
+    // deltas come back over the same socket and are pushed into the
+    // existing `PCMStreamingAudioPlayer` bus (same player the Tier 1
+    // TTS path uses, so we don't double up output).
+    //
+    // Invariant: everything provider-specific (OpenAI vs Azure) lives
+    // inside the gateway bridge; iOS never branches on provider kind
+    // for the realtime path.
+
+    /// Bring up the realtime-bridge mic pipeline. On success the mic
+    /// tap is live and the runtime is connected to the gateway; on
+    /// failure we throw so the caller can fall back to Tier 1.
+    private func startRealtimeBridge() async throws {
+        // Tear any stale Tier 1 recognizer state down so the mic tap we
+        // install below owns bus 0 exclusively.
+        self.stopRecognition()
+
+        GatewayDiagnostics.log("talk audio: session \(Self.describeAudioSession())")
+
+        #if targetEnvironment(simulator)
+            // The simulator cannot reliably tap the mic for live realtime
+            // audio, but the runtime + connect logic still need to be
+            // exercised in test builds. Skip the mic install and let the
+            // runtime connect; tests drive audio through `_test_*` helpers.
+            if !self.allowSimulatorCapture {
+                throw NSError(domain: "TalkMode", code: 9, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Realtime-bridge mic capture is not supported on the iOS simulator",
+                ])
+            }
+        #else
+            try self.installRealtimeMicTap()
+        #endif
+
+        // Build the transport issuer. The real path routes through the
+        // paired gateway operator session; tests override.
+        let issuer = try self.resolveRealtimeTicketIssuer()
+        let gatewayURL = try await self.resolveRealtimeGatewayBaseURL()
+        let runtime = self.talkRealtimeRuntime
+        runtime.delegate = self.makeRealtimeDelegate()
+        let runtimeConfig = TalkRealtimeSessionRuntime.Config(
+            gatewayWsBase: gatewayURL,
+            agentId: nil,
+            providerId: nil,
+            voiceId: self.currentVoiceId)
+        do {
+            try await runtime.start(
+                config: runtimeConfig,
+                ticketIssuer: issuer,
+                wsFactory: self.realtimeWsFactoryOverride)
+        } catch {
+            self.teardownRealtimeMicTap()
+            throw error
+        }
+    }
+
+    /// Resolve the ticket issuer for the active run. Real path delegates
+    /// to the paired gateway's `talk.realtime.start` RPC.
+    private func resolveRealtimeTicketIssuer() throws -> GatewayRealtimeTicketIssuing {
+        if let override = self.realtimeTicketIssuerOverride {
+            return override
+        }
+        guard let gateway = self.gateway else {
+            throw NSError(domain: "TalkMode", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "No gateway session is attached",
+            ])
+        }
+        // Capture the gateway reference in a sendable closure so the
+        // issuer can re-request on ticket expiry / reconnect without
+        // re-entering the manager's MainActor context.
+        return GatewayRealtimeTicketIssuer { @Sendable method, params in
+            let paramsJSON: String?
+            if let params, !params.isEmpty {
+                let data = try JSONEncoder().encode(params)
+                paramsJSON = String(data: data, encoding: .utf8)
+            } else {
+                paramsJSON = nil
+            }
+            return try await gateway.request(
+                method: method, paramsJSON: paramsJSON, timeoutSeconds: 8)
+        }
+    }
+
+    /// Resolve the HTTP(S)/WS(S) base URL for the gateway realtime WS.
+    /// Defers to the paired gateway's active URL so the bridge runs on
+    /// the same host iOS already trusts. When the WS factory is
+    /// overridden (tests), the URL is not actually dialed, so a sentinel
+    /// is acceptable.
+    private func resolveRealtimeGatewayBaseURL() async throws -> URL {
+        // Test path: the scripted WS factory ignores the URL entirely.
+        if self.realtimeWsFactoryOverride != nil {
+            return URL(string: "wss://gateway.test")!
+        }
+        guard let gateway = self.gateway else {
+            throw NSError(domain: "TalkMode", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "No gateway session is attached",
+            ])
+        }
+        guard let url = await gateway.currentGatewayURL() else {
+            throw NSError(domain: "TalkMode", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "Gateway URL not yet known",
+            ])
+        }
+        return url
+    }
+
+    /// Install the realtime mic tap. Reuses the same resampler and
+    /// VAD-diagnostics pattern Tier 1 uses so the level meter + barge-in
+    /// threshold are consistent. The tap block is `nonisolated` (runs on
+    /// an AVAudioEngine-owned queue) and hops back to `MainActor` for
+    /// every resampled frame send.
+    private func installRealtimeMicTap() throws {
+        let input = self.audioEngine.inputNode
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "TalkMode", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid audio input format",
+            ])
+        }
+        input.removeTap(onBus: 0)
+        let resampler = RealtimeAudioResampler()
+        self.realtimeResampler = resampler
+        let tapDiagnostics = self.makeRealtimeMicVADDiagnostics()
+        self.audioTapDiagnostics = tapDiagnostics
+        let runtime = self.talkRealtimeRuntime
+        let tapBlock = Self.makeRealtimeAudioTapCallback(
+            resampler: resampler,
+            diagnostics: tapDiagnostics) { [weak runtime] frames in
+                guard let runtime else { return }
+                Task { @MainActor in
+                    for frame in frames {
+                        try? await runtime.sendAudio(pcm16: frame)
+                    }
+                }
+            }
+        input.installTap(onBus: 0, bufferSize: 2048, format: format, block: tapBlock)
+        self.inputTapInstalled = true
+        self.audioEngine.prepare()
+        try self.audioEngine.start()
+    }
+
+    /// Pure factory so unit tests can assert the resampler <-> runtime
+    /// edge without touching AVAudioEngine.
+    nonisolated static func makeRealtimeAudioTapCallback(
+        resampler: RealtimeAudioResampler,
+        diagnostics: AudioTapDiagnostics,
+        onFrames: @escaping @Sendable ([Data]) -> Void) -> AVAudioNodeTapBlock
+    {
+        { buffer, _ in
+            diagnostics.onBuffer(buffer)
+            guard let data = buffer.floatChannelData?.pointee else { return }
+            let n = Int(buffer.frameLength)
+            guard n > 0 else { return }
+            var samples = [Float](repeating: 0, count: n)
+            for i in 0..<n {
+                samples[i] = data[i]
+            }
+            let frames = resampler.append(
+                floatSamples: samples,
+                sourceSampleRate: buffer.format.sampleRate)
+            if !frames.isEmpty {
+                onFrames(frames)
+            }
+        }
+    }
+
+    /// VAD / level-meter diagnostics bound to the current instance. The
+    /// callback powers barge-in: when the user's mic exceeds the
+    /// threshold while realtime playback is active, we interrupt.
+    private func makeRealtimeMicVADDiagnostics() -> AudioTapDiagnostics {
+        AudioTapDiagnostics(label: "talk-realtime-bridge") { [weak self] level in
+            guard let self else { return }
+            Task { @MainActor in
+                let raw = max(0, min(Double(level) * 10.0, 1.0))
+                let next = (self.micLevel * 0.80) + (raw * 0.20)
+                self.micLevel = next
+
+                if self.realtimeActive, !self.isSpeaking, !self.noiseFloorReady {
+                    self.noiseFloorSamples.append(raw)
+                    if self.noiseFloorSamples.count >= 22 {
+                        let sorted = self.noiseFloorSamples.sorted()
+                        let take = max(6, sorted.count / 2)
+                        let slice = sorted.prefix(take)
+                        let avg = slice.reduce(0.0, +) / Double(slice.count)
+                        self.noiseFloor = avg
+                        self.noiseFloorReady = true
+                        self.noiseFloorSamples.removeAll(keepingCapacity: true)
+                    }
+                }
+
+                let threshold: Double = if let floor = self.noiseFloor, self.noiseFloorReady {
+                    min(0.35, max(0.12, floor + 0.10))
+                } else {
+                    0.18
+                }
+                if raw >= threshold {
+                    self.lastAudioActivity = Date()
+                    if self.isSpeaking,
+                        self.interruptOnSpeech,
+                        self.shouldAllowSpeechInterruptForCurrentRoute()
+                    {
+                        await self.handleRealtimeBargeIn()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the delegate forwarded to `TalkRealtimeSessionRuntime`. The
+    /// delegate stitches together transcript updates, assistant audio
+    /// playback, error handling, and graceful degrade to Tier 1 on
+    /// unrecoverable errors.
+    private func makeRealtimeDelegate() -> TalkRealtimeSessionRuntime.Delegate {
+        var delegate = TalkRealtimeSessionRuntime.Delegate()
+        delegate.onSessionReady = { [weak self] voiceRunId, sessionKey in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.info(
+                    "realtime-bridge session ready voiceRunId=\(voiceRunId, privacy: .public) sessionKey=\(sessionKey, privacy: .public)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: session.ready voiceRunId=\(voiceRunId) sessionKey=\(sessionKey)")
+            }
+        }
+        delegate.onFinalTranscript = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                self.lastTranscript = trimmed
+                self.lastHeard = Date()
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: final transcript chars=\(trimmed.count)")
+            }
+        }
+        delegate.onAssistantTextDelta = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard !text.isEmpty else { return }
+                let appended = (self.lastSpokenText ?? "") + text
+                self.lastSpokenText = appended
+            }
+        }
+        delegate.onAssistantAudioChunk = { [weak self] pcm16 in
+            Task { @MainActor [weak self] in
+                self?.enqueueRealtimeAssistantAudio(pcm16: pcm16)
+            }
+        }
+        delegate.onAssistantAudioDone = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.realtimeAudioFeed?.finish()
+                self?.realtimeAudioFeed = nil
+            }
+        }
+        delegate.onToolCallStarted = { [weak self] callId, name in
+            Task { @MainActor [weak self] in
+                self?.logger.info(
+                    "realtime-bridge tool call started callId=\(callId, privacy: .public) name=\(name, privacy: .public)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: tool.started callId=\(callId) name=\(name)")
+            }
+        }
+        delegate.onToolCallFinished = { [weak self] callId, name, durationMs, ok in
+            Task { @MainActor [weak self] in
+                self?.logger.info(
+                    "realtime-bridge tool call finished callId=\(callId, privacy: .public) name=\(name, privacy: .public) ok=\(ok)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: tool.finished callId=\(callId) name=\(name) durationMs=\(durationMs) ok=\(ok)")
+            }
+        }
+        delegate.onFallbackActivated = { [weak self] from, to, reason in
+            Task { @MainActor [weak self] in
+                self?.logger.warning(
+                    "realtime-bridge fallback from=\(from, privacy: .public) to=\(to, privacy: .public) reason=\(reason, privacy: .public)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: fallback from=\(from) to=\(to) reason=\(reason)")
+            }
+        }
+        delegate.onError = { [weak self] code, message, recoverable in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.error(
+                    "realtime-bridge error code=\(code, privacy: .public) msg=\(message, privacy: .public) recoverable=\(recoverable)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: error code=\(code) msg=\(message) recoverable=\(recoverable)")
+                if !recoverable {
+                    self.realtimeDegraded = true
+                    await self.tearDownRealtimeSession()
+                    if self.isEnabled {
+                        await self.start()
+                    }
+                }
+            }
+        }
+        delegate.onClosed = { [weak self] reason, code in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.info(
+                    "realtime-bridge closed reason=\(reason, privacy: .public) code=\(code)")
+                GatewayDiagnostics.log(
+                    "talk realtime-bridge: closed reason=\(reason) code=\(code)")
+                self.realtimeAudioFeed?.finish()
+                self.realtimeAudioFeed = nil
+            }
+        }
+        return delegate
+    }
+
+    /// Push a PCM16 24 kHz chunk into the playback feeder, lazily
+    /// starting the playback task on the first chunk.
+    private func enqueueRealtimeAssistantAudio(pcm16: Data) {
+        guard !pcm16.isEmpty else { return }
+        if self.realtimeAudioFeed == nil {
+            self.startRealtimePlaybackFeed()
+        }
+        self.realtimeAudioFeed?.yield(pcm16)
+    }
+
+    /// Start a single long-lived playback task that drains PCM chunks
+    /// from the realtime session into `pcmPlayer`. One task per session
+    /// keeps the queue stable across multiple assistant turns.
+    private func startRealtimePlaybackFeed() {
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            self.realtimeAudioFeed = continuation
+        }
+        let player = self.pcmPlayer
+        self.lastPlaybackWasPCM = true
+        self.isSpeaking = true
+        self.statusText = "Speaking…"
+        self.realtimePlaybackTask = Task { @MainActor [weak self] in
+            let result = await player.play(
+                stream: stream,
+                sampleRate: RealtimeAudioResampler.Constants.targetSampleRate)
+            guard let self else { return }
+            if !result.finished, let interruptedAt = result.interruptedAt {
+                self.lastInterruptedAtSeconds = interruptedAt
+            }
+            self.isSpeaking = false
+            self.realtimePlaybackTask = nil
+            self.realtimeAudioFeed = nil
+            if self.realtimeActive, self.isEnabled {
+                self.statusText = "Listening"
+            }
+        }
+    }
+
+    /// Barge-in: stop playback immediately, tell the server to cancel
+    /// the in-flight response, and reset for the next user utterance.
+    private func handleRealtimeBargeIn() async {
+        _ = self.pcmPlayer.stop()
+        self.realtimeAudioFeed?.finish()
+        self.realtimeAudioFeed = nil
+        self.realtimePlaybackTask?.cancel()
+        self.realtimePlaybackTask = nil
+        self.isSpeaking = false
+        self.lastInterruptedAtSeconds = Date().timeIntervalSince1970
+        do {
+            try await self.talkRealtimeRuntime.cancelActiveResponse()
+            GatewayDiagnostics.log("talk realtime-bridge: barge-in cancelled active response")
+        } catch {
+            self.logger.warning(
+                "realtime-bridge cancel failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Tear down everything owned by the realtime-bridge splice. Idempotent.
+    private func tearDownRealtimeSession() async {
+        self.realtimeAudioFeed?.finish()
+        self.realtimeAudioFeed = nil
+        self.realtimePlaybackTask?.cancel()
+        self.realtimePlaybackTask = nil
+        _ = self.pcmPlayer.stop()
+        self.teardownRealtimeMicTap()
+        await self.talkRealtimeRuntime.close()
+        self.realtimeActive = false
+    }
+
+    /// Remove the realtime mic tap and stop the engine if we installed
+    /// it for the bridge. Mirrors Tier 1's mic teardown but does not
+    /// touch SFSpeechRecognizer state.
+    private func teardownRealtimeMicTap() {
+        self.realtimeResampler?.reset()
+        self.realtimeResampler = nil
+        self.audioTapDiagnostics = nil
+        if self.inputTapInstalled {
+            self.audioEngine.inputNode.removeTap(onBus: 0)
+            self.inputTapInstalled = false
+        }
+        if self.audioEngine.isRunning {
+            self.audioEngine.stop()
+        }
+        self.micLevel = 0
+        self.noiseFloorSamples.removeAll(keepingCapacity: true)
+        self.noiseFloor = nil
+        self.noiseFloorReady = false
     }
 
     static func configureAudioSession() throws {
@@ -2047,6 +2521,28 @@ extension TalkModeManager {
         try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [
             .allowBluetoothHFP,
             .defaultToSpeaker,
+        ])
+        try? session.setPreferredSampleRate(48_000)
+        try? session.setPreferredIOBufferDuration(0.02)
+        try session.setActive(true, options: [])
+    }
+
+    /// Realtime-bridge audio session: `.voiceChat` activates
+    /// `AUVoiceProcessingIO` under the hood, which enables iOS acoustic
+    /// echo cancellation, noise suppression, and automatic gain control.
+    /// This is the canonical full-duplex voice-chat configuration and
+    /// is what prevents the realtime model from triggering its own
+    /// `server_vad` on speaker-played TTS audio.
+    ///
+    /// Only used by the realtime-bridge path — Tier 1 keeps
+    /// `.spokenAudio` so the existing ElevenLabs / discrete STT
+    /// behavior is untouched.
+    static func configureRealtimeAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
+            .defaultToSpeaker,
+            .allowBluetooth,
+            .allowBluetoothA2DP,
         ])
         try? session.setPreferredSampleRate(48_000)
         try? session.setPreferredIOBufferDuration(0.02)
@@ -2070,7 +2566,7 @@ extension TalkModeManager {
     }
 }
 
-private final class AudioTapDiagnostics: @unchecked Sendable {
+final class AudioTapDiagnostics: @unchecked Sendable {
     private let label: String
     private let onLevel: (@Sendable (Float) -> Void)?
     private let lock = NSLock()
@@ -2170,6 +2666,49 @@ extension TalkModeManager {
     func _test_incrementalIngest(_ text: String, isFinal: Bool) -> [String] {
         self.incrementalSpeechBuffer.ingest(text: text, isFinal: isFinal)
     }
+
+    // MARK: - Realtime bridge test hooks.
+
+    /// Whether the bridge path would be taken on the next `start()`.
+    /// Mirrors the flag `reloadConfig()` populates from
+    /// `talk.providers.<id>.realtimeBridge`.
+    var _test_realtimeBridgeEnabled: Bool {
+        get { self.realtimeBridgeEnabled }
+        set { self.realtimeBridgeEnabled = newValue }
+    }
+
+    /// Drive the realtime-bridge startup without requiring a real
+    /// gateway / mic / permissions. The mic tap install is skipped on
+    /// the simulator path; the runtime connect uses whatever
+    /// `realtimeTicketIssuerOverride` + `realtimeWsFactoryOverride` are
+    /// configured.
+    func _test_startRealtimeBridge() async throws {
+        self.captureMode = .continuous
+        try await self.startRealtimeBridge()
+        self.isListening = true
+        self.realtimeActive = true
+    }
+
+    /// Inject a PCM16 chunk as if the realtime session had emitted it.
+    /// Exercises the playback feeder without touching AVAudioEngine.
+    func _test_enqueueAssistantAudio(pcm16: Data) {
+        self.enqueueRealtimeAssistantAudio(pcm16: pcm16)
+    }
+
+    /// Tear down realtime state the way `stop()` would.
+    func _test_tearDownRealtime() async {
+        await self.tearDownRealtimeSession()
+    }
+
+    /// Observability hook for the lifecycle tests.
+    var _test_realtimeActive: Bool { self.realtimeActive }
+
+    /// Whether the runtime currently owns a connected session.
+    var _test_runtimeIsActive: Bool { self.talkRealtimeRuntime.isActive }
+
+    /// Shared runtime reference so tests can wire their own delegate
+    /// hooks or send frames directly.
+    var _test_realtimeRuntime: TalkRealtimeSessionRuntime { self.talkRealtimeRuntime }
 }
 #endif
 

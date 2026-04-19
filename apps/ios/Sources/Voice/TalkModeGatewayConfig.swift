@@ -12,6 +12,11 @@ struct TalkModeGatewayConfigState {
     let rawConfigApiKey: String?
     let interruptOnSpeech: Bool?
     let silenceTimeoutMs: Int
+    /// Whether `talk.providers.<activeProvider>.realtimeBridge` is set to
+    /// true. When true, the gateway hosts a realtime voice WS at
+    /// `/talk/realtime` and iOS should drive voice via
+    /// `GatewayRealtimeTransport` instead of the Tier 1 STT + TTS path.
+    let realtimeBridgeEnabled: Bool
 }
 
 enum TalkModeGatewayConfigParser {
@@ -53,6 +58,11 @@ enum TalkModeGatewayConfigParser {
         let silenceTimeoutMs = TalkConfigParsing.resolvedSilenceTimeoutMs(
             talk,
             fallback: defaultSilenceTimeoutMs)
+        // Realtime bridge opt-in: when the provider carries
+        // `realtimeBridge: true`, iOS should take the gateway-proxied
+        // realtime path instead of Tier 1 STT + TTS. Unset or false =
+        // Tier 1 unchanged.
+        let realtimeBridgeEnabled = activeConfig?["realtimeBridge"]?.boolValue ?? false
 
         return TalkModeGatewayConfigState(
             activeProvider: activeProvider,
@@ -64,6 +74,7 @@ enum TalkModeGatewayConfigParser {
             defaultOutputFormat: defaultOutputFormat,
             rawConfigApiKey: rawConfigApiKey,
             interruptOnSpeech: interruptOnSpeech,
-            silenceTimeoutMs: silenceTimeoutMs)
+            silenceTimeoutMs: silenceTimeoutMs,
+            realtimeBridgeEnabled: realtimeBridgeEnabled)
     }
 }
