@@ -1,25 +1,18 @@
 import {
   createAccountListHelpers,
   DEFAULT_ACCOUNT_ID,
+  hasConfiguredAccountValue,
   normalizeAccountId,
   resolveAccountWithDefaultFallback,
   resolveMergedAccountConfig,
 } from "openclaw/plugin-sdk/account-core";
 import { tryReadSecretFileSync } from "openclaw/plugin-sdk/secret-file-runtime";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { normalizeResolvedSecretInputString } from "./secret-input.js";
 import type { CoreConfig, NextcloudTalkAccountConfig } from "./types.js";
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
-function normalizeLowercaseStringOrEmpty(value: unknown): string {
-  return normalizeOptionalString(value)?.toLowerCase() ?? "";
-}
 
 function isTruthyEnvValue(value?: string): boolean {
   const normalized = normalizeLowercaseStringOrEmpty(value);
@@ -47,6 +40,15 @@ const {
   resolveDefaultAccountId: resolveDefaultNextcloudTalkAccountId,
 } = createAccountListHelpers("nextcloud-talk", {
   normalizeAccountId,
+  hasImplicitDefaultAccount: (cfg) => {
+    const channel = cfg.channels?.["nextcloud-talk"];
+    return Boolean(
+      channel?.baseUrl?.trim() &&
+      (hasConfiguredAccountValue(channel.botSecret) ||
+        channel.botSecretFile?.trim() ||
+        process.env.NEXTCLOUD_TALK_BOT_SECRET?.trim()),
+    );
+  },
 });
 export { resolveDefaultNextcloudTalkAccountId };
 
@@ -144,10 +146,4 @@ export function resolveNextcloudTalkAccount(params: {
     hasCredential: (account) => account.secretSource !== "none",
     resolveDefaultAccountId: () => resolveDefaultNextcloudTalkAccountId(params.cfg),
   });
-}
-
-export function listEnabledNextcloudTalkAccounts(cfg: CoreConfig): ResolvedNextcloudTalkAccount[] {
-  return listNextcloudTalkAccountIds(cfg)
-    .map((accountId) => resolveNextcloudTalkAccount({ cfg, accountId }))
-    .filter((account) => account.enabled);
 }

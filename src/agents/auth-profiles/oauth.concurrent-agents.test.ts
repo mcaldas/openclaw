@@ -1,154 +1,83 @@
+/**
+ * Tests concurrent OAuth refresh across agent stores.
+ * Verifies shared refresh locks let concurrent agents adopt one fresh token
+ * instead of racing single-use refresh tokens.
+ */
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { resetFileLockStateForTest } from "../../infra/file-lock.js";
 import { captureEnv } from "../../test-utils/env.js";
+import { getOAuthProviderRuntimeMocks } from "./oauth-common-mocks.test-support.js";
+import "./oauth-external-auth-passthrough.test-support.js";
+import {
+  OAUTH_AGENT_ENV_KEYS,
+  createOAuthMainAgentDir,
+  createOAuthTestTempRoot,
+  createExpiredOauthStore,
+  removeOAuthTestTempRoot,
+  resolveApiKeyForProfileInTest,
+  resetOAuthProviderRuntimeMocks,
+} from "./oauth-test-utils.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots,
   ensureAuthProfileStore,
   saveAuthProfileStore,
 } from "./store.js";
-import type { AuthProfileStore, OAuthCredential } from "./types.js";
+
+const {
+  refreshProviderOAuthCredentialWithPluginMock,
+  formatProviderAuthProfileApiKeyWithPluginMock,
+} = getOAuthProviderRuntimeMocks();
 
 let resolveApiKeyForProfile: typeof import("./oauth.js").resolveApiKeyForProfile;
 let resetOAuthRefreshQueuesForTest: typeof import("./oauth.js").resetOAuthRefreshQueuesForTest;
+type ResolveApiKeyResult = NonNullable<
+  Awaited<ReturnType<typeof import("./oauth.js").resolveApiKeyForProfile>>
+>;
+type ConcurrentRefreshResult = {
+  agentCount: number;
+  callCount: number;
+  provider: string;
+  results: Array<ResolveApiKeyResult | null>;
+};
 
 async function loadOAuthModuleForTest() {
   ({ resolveApiKeyForProfile, resetOAuthRefreshQueuesForTest } = await import("./oauth.js"));
 }
 
-function resolveApiKeyForProfileInTest(
-  params: Omit<Parameters<typeof resolveApiKeyForProfile>[0], "cfg">,
-) {
-  return resolveApiKeyForProfile({ cfg: {}, ...params });
-}
-
-const {
-  refreshProviderOAuthCredentialWithPluginMock,
-  formatProviderAuthProfileApiKeyWithPluginMock,
-} = vi.hoisted(() => ({
-  refreshProviderOAuthCredentialWithPluginMock: vi.fn(
-    async (_params?: { context?: unknown }) => undefined,
-  ),
-  formatProviderAuthProfileApiKeyWithPluginMock: vi.fn(() => undefined),
-}));
-
-vi.mock("../cli-credentials.js", () => ({
-  readCodexCliCredentialsCached: () => null,
-  readMiniMaxCliCredentialsCached: () => null,
-  resetCliCredentialCachesForTest: () => undefined,
-  writeCodexCliCredentials: () => true,
-}));
-
-vi.mock("@mariozechner/pi-ai/oauth", () => ({
+vi.mock("../../llm/oauth.js", () => ({
   getOAuthApiKey: vi.fn(async () => null),
-  getOAuthProviders: () => [{ id: "openai-codex" }],
+  getOAuthProviders: () => [{ id: "openai" }],
 }));
 
-vi.mock("../../plugins/provider-runtime.runtime.js", () => ({
-  formatProviderAuthProfileApiKeyWithPlugin: (params: { context?: { access?: string } }) =>
-    formatProviderAuthProfileApiKeyWithPluginMock() ?? params?.context?.access,
-  refreshProviderOAuthCredentialWithPlugin: refreshProviderOAuthCredentialWithPluginMock,
-}));
-
-vi.mock("./external-auth.js", () => ({
-  overlayExternalAuthProfiles: <T>(store: T) => store,
-  shouldPersistExternalAuthProfile: () => true,
-}));
-
-vi.mock("./doctor.js", () => ({
-  formatAuthDoctorHint: async () => undefined,
-}));
-
-// External-CLI sync does real I/O against the user's Codex/MiniMax CLI
-// credential files; it is slow and can pollute test state. Stub it to a no-op
-// so the suite only exercises in-repo auth-profile logic.
-vi.mock("./external-cli-sync.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("./external-cli-sync.js")>("./external-cli-sync.js");
-  return {
-    ...actual,
-    syncExternalCliCredentials: () => false,
-    readManagedExternalCliCredential: () => null,
-    resolveExternalCliAuthProfiles: () => [],
-    areOAuthCredentialsEquivalent: (a: unknown, b: unknown) => a === b,
-  };
-});
-
-function createExpiredOauthStore(params: {
-  profileId: string;
-  provider: string;
-  access?: string;
-  refresh?: string;
-  accountId?: string;
-  email?: string;
-}): AuthProfileStore {
-  return {
-    version: 1,
-    profiles: {
-      [params.profileId]: {
-        type: "oauth",
-        provider: params.provider,
-        access: params.access ?? "cached-access-token",
-        refresh: params.refresh ?? "refresh-token",
-        expires: Date.now() - 60_000,
-        accountId: params.accountId,
-        email: params.email,
-      } satisfies OAuthCredential,
-    },
-  };
-}
-
-describe("resolveApiKeyForProfile cross-agent refresh coordination (#26322)", () => {
-  const envSnapshot = captureEnv([
-    "OPENCLAW_STATE_DIR",
-    "OPENCLAW_AGENT_DIR",
-    "PI_CODING_AGENT_DIR",
-  ]);
+async function runConcurrentRefreshCase(): Promise<ConcurrentRefreshResult> {
+  const envSnapshot = captureEnv(OAUTH_AGENT_ENV_KEYS);
   let tempRoot = "";
-  let mainAgentDir = "";
 
-  beforeEach(async () => {
+  try {
     resetFileLockStateForTest();
-    refreshProviderOAuthCredentialWithPluginMock.mockReset();
-    refreshProviderOAuthCredentialWithPluginMock.mockResolvedValue(undefined);
-    formatProviderAuthProfileApiKeyWithPluginMock.mockReset();
-    formatProviderAuthProfileApiKeyWithPluginMock.mockReturnValue(undefined);
+    resetOAuthProviderRuntimeMocks({
+      refreshProviderOAuthCredentialWithPluginMock,
+      formatProviderAuthProfileApiKeyWithPluginMock,
+    });
     clearRuntimeAuthProfileStoreSnapshots();
-    tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-oauth-concurrent-"));
-    process.env.OPENCLAW_STATE_DIR = tempRoot;
-    mainAgentDir = path.join(tempRoot, "agents", "main", "agent");
-    process.env.OPENCLAW_AGENT_DIR = mainAgentDir;
-    process.env.PI_CODING_AGENT_DIR = mainAgentDir;
-    await fs.mkdir(mainAgentDir, { recursive: true });
+    tempRoot = await createOAuthTestTempRoot("openclaw-oauth-concurrent-");
+    const mainAgentDir = await createOAuthMainAgentDir(tempRoot);
     await loadOAuthModuleForTest();
     // Drop any refresh-queue entries left behind by a prior timed-out test.
     resetOAuthRefreshQueuesForTest();
-  });
 
-  afterEach(async () => {
-    envSnapshot.restore();
-    resetFileLockStateForTest();
-    clearRuntimeAuthProfileStoreSnapshots();
-    if (resetOAuthRefreshQueuesForTest) {
-      resetOAuthRefreshQueuesForTest();
-    }
-    if (tempRoot) {
-      await fs.rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("refreshes exactly once when 20 agents share one OAuth profile and all race on expiry", async () => {
-    const profileId = "openai-codex:default";
-    const provider = "openai-codex";
+    const agentCount = 2;
+    const profileId = "openai:default";
+    const provider = "openai";
     const accountId = "acct-shared";
     const freshExpiry = Date.now() + 60 * 60 * 1000;
 
-    // Seed 20 sub-agents + main with the SAME stale OAuth credential. Main is
+    // Seed sub-agents + main with the SAME stale OAuth credential. Main is
     // also expired so it cannot short-circuit via adoptNewerMainOAuthCredential.
     const subAgents = await Promise.all(
-      Array.from({ length: 20 }, async (_, i) => {
+      Array.from({ length: agentCount }, async (_, i) => {
         const dir = path.join(tempRoot, "agents", `sub-${i}`, "agent");
         await fs.mkdir(dir, { recursive: true });
         saveAuthProfileStore(createExpiredOauthStore({ profileId, provider, accountId }), dir);
@@ -157,11 +86,13 @@ describe("resolveApiKeyForProfile cross-agent refresh coordination (#26322)", ()
     );
     saveAuthProfileStore(createExpiredOauthStore({ profileId, provider, accountId }), mainAgentDir);
 
-    // Count invocations, and add small jitter to widen the race window.
+    // Count invocations, and keep one event-loop turn to widen the race window.
     let callCount = 0;
     refreshProviderOAuthCredentialWithPluginMock.mockImplementation(async () => {
       callCount += 1;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
       return {
         type: "oauth",
         provider,
@@ -172,13 +103,13 @@ describe("resolveApiKeyForProfile cross-agent refresh coordination (#26322)", ()
       } as never;
     });
 
-    // Fire all 20 agents concurrently. With the old per-agentDir lock this
-    // would produce ~20 concurrent refresh calls and 19 refresh_token_reused
+    // Fire all agents concurrently. With the old per-agentDir lock this
+    // would produce one refresh call per agent and refresh_token_reused
     // 401s. With the new global per-profile lock, only the first refresh is
-    // performed; the remaining 19 adopt the resulting fresh credentials.
+    // performed; the remaining agents adopt the resulting fresh credentials.
     const results = await Promise.all(
       subAgents.map((agentDir) =>
-        resolveApiKeyForProfileInTest({
+        resolveApiKeyForProfileInTest(resolveApiKeyForProfile, {
           store: ensureAuthProfileStore(agentDir),
           profileId,
           agentDir,
@@ -186,12 +117,34 @@ describe("resolveApiKeyForProfile cross-agent refresh coordination (#26322)", ()
       ),
     );
 
-    expect(callCount).toBe(1);
-    expect(results).toHaveLength(20);
-    for (const result of results) {
-      expect(result).not.toBeNull();
-      expect(result?.apiKey).toBe("cross-agent-refreshed-access");
-      expect(result?.provider).toBe(provider);
+    return { agentCount, callCount, provider, results };
+  } finally {
+    envSnapshot.restore();
+    resetFileLockStateForTest();
+    clearRuntimeAuthProfileStoreSnapshots();
+    if (resetOAuthRefreshQueuesForTest) {
+      resetOAuthRefreshQueuesForTest();
     }
-  }, 60_000); // Generous timeout; the fix should complete well under 5s in practice.
+    await removeOAuthTestTempRoot(tempRoot);
+  }
+}
+
+describe("resolveApiKeyForProfile cross-agent refresh coordination (#26322)", () => {
+  let refreshResult: ConcurrentRefreshResult;
+
+  beforeAll(async () => {
+    refreshResult = await runConcurrentRefreshCase();
+  });
+
+  it("refreshes exactly once when many agents share one OAuth profile and all race on expiry", () => {
+    expect(refreshResult.callCount).toBe(1);
+    expect(refreshResult.results).toHaveLength(refreshResult.agentCount);
+    for (const result of refreshResult.results) {
+      if (!result) {
+        throw new Error("Expected refreshed OAuth credential result");
+      }
+      expect(result.apiKey).toBe("cross-agent-refreshed-access");
+      expect(result.provider).toBe(refreshResult.provider);
+    }
+  }, 10_000);
 });

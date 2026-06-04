@@ -27,7 +27,7 @@ function createDefaultSessionStoreEntry() {
     totalTokens: 5_000,
     totalTokensFresh: true as boolean,
     contextTokens: 10_000,
-    model: "pi:opus",
+    model: "test:opus",
     sessionId: "abc123",
     systemSent: true,
   };
@@ -40,7 +40,7 @@ function createUnknownUsageSessionStore() {
       inputTokens: 2_000,
       outputTokens: 3_000,
       contextTokens: 10_000,
-      model: "pi:opus",
+      model: "test:opus",
     },
   };
 }
@@ -85,8 +85,32 @@ function getRuntimeLogs() {
   return runtimeLogMock.mock.calls.map((call: unknown[]) => String(call[0]));
 }
 
+function getRuntimeLog(index: number): string {
+  const call = runtimeLogMock.mock.calls[index];
+  if (!call) {
+    throw new Error(`expected runtime log call ${index}`);
+  }
+  return String(call[0]);
+}
+
+function getLastRuntimeLog(): string {
+  return getRuntimeLog(runtimeLogMock.mock.calls.length - 1);
+}
+
 function getJoinedRuntimeLogs() {
   return getRuntimeLogs().join("\n");
+}
+
+function expectLogsInclude(logs: readonly string[], fragment: string) {
+  expect(logs.join("\n")).toContain(fragment);
+}
+
+function expectLogsExclude(logs: readonly string[], fragment: string) {
+  expect(logs.join("\n")).not.toContain(fragment);
+}
+
+function expectLogsMatch(logs: readonly string[], pattern: RegExp) {
+  expect(logs.some((log) => pattern.test(log))).toBe(true);
 }
 
 async function runStatusAndGetLogs(args: Parameters<typeof statusCommand>[0] = {}) {
@@ -105,6 +129,7 @@ type ProbeGatewayResult = {
   url: string;
   connectLatencyMs: number | null;
   error: string | null;
+  connectErrorDetails?: unknown;
   close: { code: number; reason: string } | null;
   health: unknown;
   status: unknown;
@@ -202,10 +227,7 @@ function createSessionStatusRows() {
     >;
     const recent = Object.entries(store).map(([key, entry]) => {
       const contextTokens = typeof entry.contextTokens === "number" ? entry.contextTokens : null;
-      const freshTotal =
-        typeof entry.totalTokens === "number" && (entry.totalTokensFresh ?? true)
-          ? entry.totalTokens
-          : null;
+      const total = typeof entry.totalTokens === "number" ? entry.totalTokens : null;
       return {
         agentId: agent.id,
         key,
@@ -217,18 +239,14 @@ function createSessionStatusRows() {
         verboseLevel: entry.verboseLevel,
         inputTokens: entry.inputTokens,
         outputTokens: entry.outputTokens,
-        totalTokens: freshTotal,
-        totalTokensFresh: freshTotal !== null,
+        totalTokens: total,
+        totalTokensFresh: typeof entry.totalTokens === "number" ? entry.totalTokensFresh : false,
         cacheRead: entry.cacheRead,
         cacheWrite: entry.cacheWrite,
         remainingTokens:
-          freshTotal !== null && contextTokens !== null
-            ? Math.max(0, contextTokens - freshTotal)
-            : null,
+          total !== null && contextTokens !== null ? Math.max(0, contextTokens - total) : null,
         percentUsed:
-          freshTotal !== null && contextTokens
-            ? Math.round((freshTotal / contextTokens) * 100)
-            : null,
+          total !== null && contextTokens ? Math.round((total / contextTokens) * 100) : null,
         model: typeof entry.model === "string" ? entry.model : null,
         contextTokens,
         flags: [
@@ -244,7 +262,7 @@ function createSessionStatusRows() {
     paths: byAgent.map((entry) => entry.path),
     count: recent.length,
     defaults: {
-      model: recent[0]?.model ?? "pi:opus",
+      model: recent[0]?.model ?? "test:opus",
       contextTokens: recent[0]?.contextTokens ?? 10_000,
     },
     recent,
@@ -264,11 +282,11 @@ async function createMockStatusScanResult(params: { includePluginCompatibility?:
     ...mocks.listGatewayAgentsBasic(),
     bootstrapPendingCount: 0,
     totalSessions: 1,
-    agents: mocks.listGatewayAgentsBasic().agents.map((agent: { id: string; name?: string }) => ({
-      ...agent,
-      bootstrapPending: false,
-      activeSessions: 1,
-    })),
+    agents: mocks
+      .listGatewayAgentsBasic()
+      .agents.map((agent: { id: string; name?: string }) =>
+        Object.assign({}, agent, { bootstrapPending: false, activeSessions: 1 }),
+      ),
   };
   const sessions = createSessionStatusRows();
   const channelIssues = gatewayReachable
@@ -446,6 +464,7 @@ const mocks = vi.hoisted(() => ({
       inconsistent_timestamps: 0,
     },
   }),
+  getInspectableTaskAuditFindings: vi.fn().mockReturnValue([]),
   resolveGatewayService: vi.fn().mockReturnValue({
     label: "LaunchAgent",
     loadedText: "loaded",
@@ -488,6 +507,10 @@ vi.mock("../channels/config-presence.js", () => ({
     ),
   listPotentialConfiguredChannelIds: (cfg: { channels?: Record<string, unknown> }) =>
     Object.keys(cfg.channels ?? {}).filter((key) => key !== "defaults" && key !== "modelByChannel"),
+  listPotentialConfiguredChannelPresenceSignals: (cfg: { channels?: Record<string, unknown> }) =>
+    Object.keys(cfg.channels ?? {})
+      .filter((key) => key !== "defaults" && key !== "modelByChannel")
+      .map((channelId) => ({ channelId, source: "config" })),
 }));
 
 vi.mock("../plugins/memory-runtime.js", () => ({
@@ -530,6 +553,9 @@ vi.mock("../config/sessions/store-read.js", () => ({
   readSessionStoreReadOnly: mocks.loadSessionStore,
 }));
 vi.mock("../config/sessions/types.js", () => ({
+  resolveSessionTotalTokens: vi.fn((entry?: { totalTokens?: number }) =>
+    typeof entry?.totalTokens === "number" ? entry.totalTokens : undefined,
+  ),
   resolveFreshSessionTotalTokens: vi.fn(
     (entry?: { totalTokens?: number; totalTokensFresh?: boolean }) =>
       typeof entry?.totalTokens === "number" && entry?.totalTokensFresh !== false
@@ -688,6 +714,7 @@ vi.mock("../infra/update-check.js", () => ({
   compareSemverStrings: vi.fn(() => 0),
 }));
 vi.mock("../config/config.js", () => ({
+  getRuntimeConfig: mocks.loadConfig,
   loadConfig: mocks.loadConfig,
   readBestEffortConfig: vi.fn(async () => mocks.loadConfig()),
   resolveGatewayPort: vi.fn(() => 18789),
@@ -704,6 +731,7 @@ vi.mock("../node-host/config.js", () => ({
 vi.mock("../tasks/task-registry.maintenance.js", () => ({
   getInspectableTaskRegistrySummary: mocks.getInspectableTaskRegistrySummary,
   getInspectableTaskAuditSummary: mocks.getInspectableTaskAuditSummary,
+  getInspectableTaskAuditFindings: mocks.getInspectableTaskAuditFindings,
 }));
 vi.mock("../security/audit.js", () => ({
   runSecurityAudit: mocks.runSecurityAudit,
@@ -739,6 +767,7 @@ vi.mock("./status-runtime-shared.ts", () => ({
       deep: false,
       includeFilesystem: true,
       includeChannelSecurity: true,
+      loadPluginSecurityCollectors: false,
     }),
   ),
   resolveStatusUsageSummary: vi.fn(async () => undefined),
@@ -758,6 +787,7 @@ vi.mock("./status-runtime-shared.ts", () => ({
                 deep: false,
                 includeFilesystem: true,
                 includeChannelSecurity: true,
+                loadPluginSecurityCollectors: false,
               }))
           )({
             config: params.config,
@@ -776,6 +806,10 @@ vi.mock("./status-runtime-shared.ts", () => ({
   ),
 }));
 
+import {
+  resolveStatusRuntimeSnapshot,
+  resolveStatusUsageSummary,
+} from "./status-runtime-shared.ts";
 import { resolvePairingRecoveryContext, statusCommand } from "./status.command.js";
 
 const runtime = {
@@ -823,31 +857,31 @@ vi.mock("./status.daemon.js", () => ({
   getDaemonStatusSummary: vi.fn(async () => {
     const service = mocks.resolveGatewayService();
     const loaded = await service.isLoaded();
-    const runtime = await service.readRuntime();
+    const runtimeValue = await service.readRuntime();
     const command = await service.readCommand();
     return {
       label: service.label,
-      installed: Boolean(command) || runtime?.status === "running",
+      installed: Boolean(command) || runtimeValue?.status === "running",
       loaded,
       managedByOpenClaw: Boolean(command),
-      externallyManaged: !command && runtime?.status === "running",
+      externallyManaged: !command && runtimeValue?.status === "running",
       loadedText: loaded ? service.loadedText : service.notLoadedText,
-      runtimeShort: runtime?.pid ? `pid ${runtime.pid}` : null,
+      runtimeShort: runtimeValue?.pid ? `pid ${runtimeValue.pid}` : null,
     };
   }),
   getNodeDaemonStatusSummary: vi.fn(async () => {
     const service = mocks.resolveNodeService();
     const loaded = await service.isLoaded();
-    const runtime = await service.readRuntime();
+    const runtimeLocal = await service.readRuntime();
     const command = await service.readCommand();
     return {
       label: service.label,
-      installed: Boolean(command) || runtime?.status === "running",
+      installed: Boolean(command) || runtimeLocal?.status === "running",
       loaded,
       managedByOpenClaw: Boolean(command),
-      externallyManaged: !command && runtime?.status === "running",
+      externallyManaged: !command && runtimeLocal?.status === "running",
       loadedText: loaded ? service.loadedText : service.notLoadedText,
-      runtimeShort: runtime?.pid ? `pid ${runtime.pid}` : null,
+      runtimeShort: runtimeLocal?.pid ? `pid ${runtimeLocal.pid}` : null,
     };
   }),
 }));
@@ -917,6 +951,8 @@ describe("statusCommand", () => {
         inconsistent_timestamps: 0,
       },
     });
+    mocks.getInspectableTaskAuditFindings.mockReset();
+    mocks.getInspectableTaskAuditFindings.mockReturnValue([]);
     mocks.runSecurityAudit.mockReset();
     mocks.runSecurityAudit.mockResolvedValue(createDefaultSecurityAuditResult());
     mocks.resolveGatewayService.mockReset();
@@ -963,14 +999,14 @@ describe("statusCommand", () => {
       createCompatibilityNotice({ pluginId: "legacy-plugin", code: "legacy-before-agent-start" }),
     ]);
     await statusCommand({ json: true }, runtime as never);
-    const payload = JSON.parse(String(runtimeLogMock.mock.calls[0]?.[0]));
+    const payload = JSON.parse(getRuntimeLog(0));
     expect(payload.linkChannel).toBeUndefined();
     expect(payload.memory).toBeNull();
     expect(payload.memoryPlugin.enabled).toBe(true);
     expect(payload.memoryPlugin.slot).toBe("memory-core");
     expect(payload.sessions.count).toBe(1);
     expect(payload.sessions.paths).toContain("/tmp/sessions.json");
-    expect(payload.sessions.defaults.model).toBeTruthy();
+    expect(payload.sessions.defaults.model).toBe("test:opus");
     expect(payload.sessions.defaults.contextTokens).toBeGreaterThan(0);
     expect(payload.sessions.recent[0].percentUsed).toBe(50);
     expect(payload.sessions.recent[0].cacheRead).toBe(2_000);
@@ -985,26 +1021,69 @@ describe("statusCommand", () => {
       count: 0,
       warnings: [],
     });
-    expect(payload.tasks).toEqual(
-      expect.objectContaining({
-        total: 0,
-        active: 0,
-        byStatus: expect.objectContaining({ queued: 0, running: 0 }),
-      }),
-    );
+    expect(payload.tasks.total).toBe(0);
+    expect(payload.tasks.active).toBe(0);
+    expect(payload.tasks.byStatus.queued).toBe(0);
+    expect(payload.tasks.byStatus.running).toBe(0);
     expect(mocks.runSecurityAudit).not.toHaveBeenCalled();
 
     runtimeLogMock.mockClear();
     await statusCommand({ json: true, all: true }, runtime as never);
 
-    const allPayload = JSON.parse(String(runtimeLogMock.mock.calls[0]?.[0]));
+    const allPayload = JSON.parse(getRuntimeLog(0));
     expect(allPayload.securityAudit.summary.critical).toBe(1);
     expect(allPayload.securityAudit.summary.warn).toBe(1);
-    expect(mocks.runSecurityAudit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        includeFilesystem: true,
-        includeChannelSecurity: true,
-      }),
+    const auditParams = mocks.runSecurityAudit.mock.calls[0]?.[0];
+    expect(auditParams?.includeFilesystem).toBe(true);
+    expect(auditParams?.includeChannelSecurity).toBe(true);
+  });
+
+  it("scopes usage resolution to the scanned config", async () => {
+    const snapshotMock = resolveStatusRuntimeSnapshot as Mock;
+    const usageMock = resolveStatusUsageSummary as Mock;
+    snapshotMock.mockClear();
+    usageMock.mockClear();
+
+    await statusCommand({ usage: true, timeoutMs: 1234 }, runtime as never);
+
+    const params = snapshotMock.mock.calls[snapshotMock.mock.calls.length - 1]?.[0] as
+      | {
+          config: unknown;
+          timeoutMs?: number;
+          usage?: boolean;
+          resolveUsage?: (input: { config: unknown; timeoutMs?: number }) => Promise<unknown>;
+        }
+      | undefined;
+    expect(params?.usage).toBe(true);
+    expect(params?.timeoutMs).toBe(1234);
+    if (!params?.resolveUsage) {
+      throw new Error("missing status usage resolver");
+    }
+    await params.resolveUsage({
+      timeoutMs: 1234,
+      config: params.config,
+    });
+    expect(usageMock).toHaveBeenCalledWith({
+      timeoutMs: 1234,
+      config: params?.config,
+    });
+  });
+
+  it("keeps default text status off the security audit path", async () => {
+    await statusCommand({}, runtime as never);
+
+    expect(mocks.runSecurityAudit).not.toHaveBeenCalled();
+  });
+
+  it("passes deep mode through to the text status scan", async () => {
+    const { scanStatus } = await import("./status.scan.js");
+    vi.mocked(scanStatus).mockClear();
+
+    await statusCommand({ deep: true, timeoutMs: 5000 }, runtime as never);
+
+    expect(scanStatus).toHaveBeenCalledWith(
+      { json: false, timeoutMs: 5000, all: undefined, deep: true },
+      runtime,
     );
   });
 
@@ -1012,12 +1091,31 @@ describe("statusCommand", () => {
     await withUnknownUsageStore(async () => {
       runtimeLogMock.mockClear();
       await statusCommand({ json: true }, runtime as never);
-      const payload = JSON.parse(String(runtimeLogMock.mock.calls.at(-1)?.[0]));
+      const payload = JSON.parse(getLastRuntimeLog());
       expect(payload.sessions.recent[0].totalTokens).toBeNull();
       expect(payload.sessions.recent[0].totalTokensFresh).toBe(false);
       expect(payload.sessions.recent[0].percentUsed).toBeNull();
       expect(payload.sessions.recent[0].remainingTokens).toBeNull();
     });
+  });
+
+  it("surfaces stale usage when totalTokens is preserved but not fresh", async () => {
+    mocks.loadSessionStore.mockReturnValue({
+      "+1000": {
+        updatedAt: Date.now() - 60_000,
+        totalTokens: 5_000,
+        totalTokensFresh: false,
+        contextTokens: 10_000,
+        model: "test:opus",
+      },
+    });
+    runtimeLogMock.mockClear();
+    await statusCommand({ json: true }, runtime as never);
+    const payload = JSON.parse(getLastRuntimeLog());
+    expect(payload.sessions.recent[0].totalTokens).toBe(5000);
+    expect(payload.sessions.recent[0].totalTokensFresh).toBe(false);
+    expect(payload.sessions.recent[0].percentUsed).toBe(50);
+    expect(payload.sessions.recent[0].remainingTokens).toBe(5000);
   });
 
   it("prints formatted lines with verbose cache details", async () => {
@@ -1029,15 +1127,14 @@ describe("statusCommand", () => {
       "OpenClaw status",
       "Overview",
       "Security audit",
-      "Summary:",
-      "CRITICAL",
+      "Skipped in fast status",
       "Dashboard",
       "macos 14.0 (arm64)",
       "Memory",
       "Plugin compatibility",
       "Channels",
       "WhatsApp",
-      "bootstrap files",
+      "no workspaces bootstrapping",
       "Tasks",
       "Sessions",
       "+1000",
@@ -1048,21 +1145,14 @@ describe("statusCommand", () => {
       "Troubleshooting:",
       "Next steps:",
     ]) {
-      expect(logs.some((line) => line.includes(token))).toBe(true);
+      expectLogsInclude(logs, token);
     }
-    expect(
-      logs.some((line) => line.includes("legacy-plugin still uses legacy before_agent_start")),
-    ).toBe(true);
-    expect(
-      logs.some(
-        (line) =>
-          line.includes("openclaw status --all") ||
-          line.includes("openclaw --profile isolated status --all"),
-      ),
-    ).toBe(true);
-    expect(logs.some((line) => line.includes("Cache"))).toBe(true);
-    expect(logs.some((line) => line.includes("40% hit"))).toBe(true);
-    expect(logs.some((line) => line.includes("read 2.0k"))).toBe(true);
+    expectLogsInclude(logs, "legacy-plugin still uses legacy before_agent_start");
+    expectLogsMatch(logs, /openclaw (?:--profile isolated )?status --all/);
+    expectLogsInclude(logs, "Cache");
+    expectLogsInclude(logs, "40% hit");
+    expectLogsInclude(logs, "read 2.0k");
+    expect(logs.join("\n")).not.toContain("no bootstrap files");
   });
 
   it("shows a maintenance hint when task audit errors are present", async () => {
@@ -1100,6 +1190,25 @@ describe("statusCommand", () => {
         inconsistent_timestamps: 0,
       },
     });
+    mocks.getInspectableTaskAuditFindings.mockReturnValue([
+      {
+        severity: "error",
+        code: "stale_running",
+        detail: "running task appears stuck",
+        task: {
+          taskId: "stale-running-task",
+          runtime: "acp",
+          ownerKey: "agent:main:main",
+          requesterSessionKey: "agent:main:main",
+          scopeKind: "session",
+          task: "Stale task",
+          status: "running",
+          deliveryStatus: "pending",
+          notifyPolicy: "done_only",
+          createdAt: Date.now() - 60_000,
+        },
+      },
+    ]);
 
     const joined = await runStatusAndGetJoinedLogs();
 
@@ -1117,8 +1226,8 @@ describe("statusCommand", () => {
       },
     });
     const logs = await runStatusAndGetLogs();
-    expect(logs.some((line) => line.includes("100% cached"))).toBe(true);
-    expect(logs.some((line) => line.includes("120% cached"))).toBe(false);
+    expectLogsInclude(logs, "100% cached");
+    expectLogsExclude(logs, "120% cached");
 
     mocks.loadSessionStore.mockReturnValue({
       "+1000": {
@@ -1130,10 +1239,9 @@ describe("statusCommand", () => {
       },
     });
     const promptSideLogs = await runStatusAndGetLogs();
-    expect(promptSideLogs.some((line) => line.includes("67% cached"))).toBe(true);
-    expect(promptSideLogs.some((line) => line.includes("40% cached"))).toBe(false);
+    expectLogsInclude(promptSideLogs, "67% cached");
+    expectLogsExclude(promptSideLogs, "40% cached");
   });
-
   it("shows node-only gateway info when no local gateway service is installed", async () => {
     mocks.resolveGatewayService.mockReturnValueOnce({
       label: "LaunchAgent",
@@ -1176,7 +1284,7 @@ describe("statusCommand", () => {
         presence: [],
       });
       const logs = await runStatusAndGetLogs();
-      expect(logs.some((l: string) => l.includes("auth token"))).toBe(true);
+      expectLogsInclude(logs, "auth token");
     });
   });
 
@@ -1198,8 +1306,10 @@ describe("statusCommand", () => {
     });
 
     await statusCommand({ json: true }, runtime as never);
-    const payload = JSON.parse(String(runtimeLogMock.mock.calls.at(-1)?.[0]));
-    expect(payload.gateway.error ?? payload.gateway.authWarning ?? null).not.toBeNull();
+    const payload = JSON.parse(getLastRuntimeLog());
+    const gatewayAuthMessage = payload.gateway.error ?? payload.gateway.authWarning;
+    expect(typeof gatewayAuthMessage).toBe("string");
+    expect(gatewayAuthMessage.trim().length).toBeGreaterThan(0);
     if (Array.isArray(payload.secretDiagnostics) && payload.secretDiagnostics.length > 0) {
       expect(
         payload.secretDiagnostics.some((entry: string) => entry.includes("gateway.auth.token")),
@@ -1254,39 +1364,77 @@ describe("statusCommand", () => {
   it("prints safe gateway pairing recovery guidance", async () => {
     expect(
       resolvePairingRecoveryContext({
-        error: "connect failed: pairing required (requestId: req-123)",
-        closeReason: "pairing required (requestId: req-123)",
+        error: "scope upgrade pending approval (requestId: req-123)",
+        closeReason: "pairing required",
       }),
-    ).toEqual({ requestId: "req-123" });
+    ).toEqual({ requestId: "req-123", reason: "scope-upgrade", remediationHint: null });
     expect(
       resolvePairingRecoveryContext({
         error: "connect failed: pairing required",
         closeReason: "connect failed",
       }),
-    ).toEqual({ requestId: null });
+    ).toEqual({ requestId: null, reason: "not-paired", remediationHint: null });
     expect(
       resolvePairingRecoveryContext({
         error: "connect failed: pairing required (requestId: req-123;rm -rf /)",
         closeReason: "pairing required (requestId: req-123;rm -rf /)",
       }),
-    ).toEqual({ requestId: null });
+    ).toEqual({ requestId: null, reason: "not-paired", remediationHint: null });
     expect(
       resolvePairingRecoveryContext({
         error: "connect failed: pairing required",
         closeReason: "pairing required (requestId: req-close-456)",
       }),
-    ).toEqual({ requestId: "req-close-456" });
+    ).toEqual({ requestId: "req-close-456", reason: "not-paired", remediationHint: null });
+    expect(
+      resolvePairingRecoveryContext({
+        details: {
+          code: "PAIRING_REQUIRED",
+          reason: "scope-upgrade",
+          requestId: "req-structured-789",
+          remediationHint: "Review the requested scopes, then approve the pending upgrade.",
+        },
+      }),
+    ).toEqual({
+      requestId: "req-structured-789",
+      reason: "scope-upgrade",
+      remediationHint: "Review the requested scopes, then approve the pending upgrade.",
+    });
+    expect(
+      resolvePairingRecoveryContext({
+        details: {
+          code: "PAIRING_REQUIRED",
+          reason: "scope-upgrade",
+          requestId: "req-structured-789;rm -rf /",
+          remediationHint: "\u001b[31mReview\nfirst\u001b[0m",
+        },
+      }),
+    ).toEqual({
+      requestId: null,
+      reason: "scope-upgrade",
+      remediationHint: "Review\\nfirst",
+    });
 
     mocks.loadConfig.mockReturnValue({
       session: {},
       channels: { whatsapp: { allowFrom: ["*"] } },
     });
     mockProbeGatewayResult({
-      error: "connect failed: pairing required (requestId: req-123)",
-      close: { code: 1008, reason: "pairing required (requestId: req-123)" },
+      error: "scope upgrade pending approval (requestId: req-123)",
+      connectErrorDetails: {
+        code: "PAIRING_REQUIRED",
+        reason: "scope-upgrade",
+        requestId: "req-123",
+        remediationHint: "Review the requested scopes, then approve the pending upgrade.",
+      },
+      close: {
+        code: 1008,
+        reason: "pairing required",
+      },
     });
     const joined = await runStatusAndGetJoinedLogs();
-    expect(joined).toContain("Gateway pairing approval required.");
+    expect(joined).toContain("Gateway scope upgrade approval required.");
+    expect(joined).toContain("more scopes than currently approved");
     expect(joined).toContain("devices approve req-123");
     expect(joined).toContain("devices approve --latest");
     expect(joined).toContain("devices list");
@@ -1318,7 +1466,7 @@ describe("statusCommand", () => {
             outputTokens: 1_000,
             totalTokens: 2_000,
             contextTokens: 10_000,
-            model: "pi:opus",
+            model: "test:opus",
           },
         };
       }
@@ -1328,7 +1476,7 @@ describe("statusCommand", () => {
     });
 
     await statusCommand({ json: true }, runtime as never);
-    const payload = JSON.parse(String(runtimeLogMock.mock.calls.at(-1)?.[0]));
+    const payload = JSON.parse(getLastRuntimeLog());
     expect(payload.sessions.count).toBe(2);
     expect(payload.sessions.paths.length).toBe(2);
     expect(

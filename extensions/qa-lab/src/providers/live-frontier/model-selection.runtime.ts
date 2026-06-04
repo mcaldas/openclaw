@@ -4,7 +4,7 @@ import {
 } from "openclaw/plugin-sdk/agent-runtime";
 import { resolveEnvApiKey } from "openclaw/plugin-sdk/provider-auth";
 
-const QA_CODEX_OAUTH_LIVE_MODEL = "openai-codex/gpt-5.4";
+const QA_CODEX_OAUTH_LIVE_MODEL = "openai/gpt-5.5";
 
 export function resolveQaLiveFrontierPreferredModel() {
   if (resolveEnvApiKey("openai")?.apiKey) {
@@ -14,11 +14,14 @@ export function resolveQaLiveFrontierPreferredModel() {
     const store = loadAuthProfileStoreForRuntime(undefined, {
       readOnly: true,
       allowKeychainPrompt: false,
+      externalCliProviderIds: ["openai"],
     });
-    if (listProfilesForProvider(store, "openai").length > 0) {
+    const openAiProfileIds = listProfilesForProvider(store, "openai");
+    const openAiProfileTypes = openAiProfileIds.map((profileId) => store.profiles[profileId]?.type);
+    if (openAiProfileTypes.some((type) => type === "api_key")) {
       return undefined;
     }
-    return listProfilesForProvider(store, "openai-codex").length > 0
+    return openAiProfileTypes.some((type) => type === "oauth" || type === "token")
       ? QA_CODEX_OAUTH_LIVE_MODEL
       : undefined;
   } catch {

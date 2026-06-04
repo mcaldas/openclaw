@@ -2,21 +2,30 @@ import crypto from "node:crypto";
 import {
   buildEmbeddingBatchGroupOptions,
   runEmbeddingBatchGroups,
-  type EmbeddingBatchExecutionParams,
   buildBatchHeaders,
   debugEmbeddingsLog,
   normalizeBatchBaseUrl,
   sanitizeAndNormalizeEmbedding,
   withRemoteHttpResponse,
 } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+import { createProviderHttpError } from "openclaw/plugin-sdk/provider-http";
+import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { GeminiEmbeddingClient, GeminiTextEmbeddingRequest } from "./embedding-provider.js";
 
-export type GeminiBatchRequest = {
+type EmbeddingBatchExecutionParams = {
+  wait: boolean;
+  pollIntervalMs: number;
+  timeoutMs: number;
+  concurrency: number;
+  debug?: (message: string, data?: Record<string, unknown>) => void;
+};
+
+type GeminiBatchRequest = {
   custom_id: string;
   request: GeminiTextEmbeddingRequest;
 };
 
-export type GeminiBatchStatus = {
+type GeminiBatchStatus = {
   name?: string;
   state?: string;
   outputConfig?: { file?: string; fileId?: string };
@@ -28,7 +37,7 @@ export type GeminiBatchStatus = {
   error?: { message?: string };
 };
 
-export type GeminiBatchOutputLine = {
+type GeminiBatchOutputLine = {
   key?: string;
   custom_id?: string;
   request_id?: string;
@@ -179,8 +188,7 @@ async function fetchGeminiBatchStatus(params: {
     },
     onResponse: async (res) => {
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`gemini batch status failed: ${res.status} ${text}`);
+        throw await createProviderHttpError(res, "gemini batch status failed");
       }
       return (await res.json()) as GeminiBatchStatus;
     },
@@ -203,8 +211,7 @@ async function fetchGeminiFileContent(params: {
     },
     onResponse: async (res) => {
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`gemini batch file content failed: ${res.status} ${text}`);
+        throw await createProviderHttpError(res, "gemini batch file content failed");
       }
       return await res.text();
     },
@@ -215,11 +222,9 @@ function parseGeminiBatchOutput(text: string): GeminiBatchOutputLine[] {
   if (!text.trim()) {
     return [];
   }
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as GeminiBatchOutputLine);
+  return normalizeStringEntries(text.split("\n")).map(
+    (line) => JSON.parse(line) as GeminiBatchOutputLine,
+  );
 }
 
 async function waitForGeminiBatch(params: {
@@ -262,7 +267,9 @@ async function waitForGeminiBatch(params: {
       throw new Error(`gemini batch ${params.batchName} timed out after ${params.timeoutMs}ms`);
     }
     params.debug?.(`gemini batch ${params.batchName} ${state}; waiting ${params.pollIntervalMs}ms`);
-    await new Promise((resolve) => setTimeout(resolve, params.pollIntervalMs));
+    await new Promise((resolve) => {
+      setTimeout(resolve, params.pollIntervalMs);
+    });
     current = undefined;
   }
 }
@@ -279,7 +286,7 @@ export async function runGeminiEmbeddingBatches(
       maxRequests: GEMINI_BATCH_MAX_REQUESTS,
       debugLabel: "memory embeddings: gemini batch submit",
     }),
-    runGroup: async ({ group, groupIndex, groups, byCustomId }) => {
+    runGroup: async ({ group, groupIndex, groups, byCustomId, pollIntervalMs, timeoutMs }) => {
       const batchInfo = await submitGeminiBatch({
         gemini: params.gemini,
         requests: group,
@@ -321,8 +328,8 @@ export async function runGeminiEmbeddingBatches(
               gemini: params.gemini,
               batchName,
               wait: params.wait,
-              pollIntervalMs: params.pollIntervalMs,
-              timeoutMs: params.timeoutMs,
+              pollIntervalMs,
+              timeoutMs,
               debug: params.debug,
               initial: batchInfo,
             });

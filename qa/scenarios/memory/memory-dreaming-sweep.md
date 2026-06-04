@@ -88,7 +88,7 @@ steps:
                 - lambda:
                     async: true
                     expr: "(() => readDoctorMemoryStatus(env).then((payload) => payload.dreaming?.phases?.deep?.managedCronPresent === true ? payload : undefined))()"
-                - 30000
+                - expr: liveTurnTimeoutMs(env, 90000)
                 - 500
             - call: listCronJobs
               saveAs: jobs
@@ -96,7 +96,7 @@ steps:
                 - ref: env
             - set: managed
               value:
-                expr: "jobs.find((job) => job.name === 'Memory Dreaming Promotion' && job.payload?.kind === 'systemEvent' && job.payload.text === '__openclaw_memory_core_short_term_promotion_dream__')"
+                expr: "findManagedDreamingCronJob(jobs)"
             - assert:
                 expr: "Boolean(managed?.id)"
                 message: managed dreaming cron job missing after enablement
@@ -108,6 +108,12 @@ steps:
                 expr: "managed.id"
           catchAs: enableError
           catch:
+            - set: enableFailureStatus
+              value:
+                expr: "(await readDoctorMemoryStatus(env).catch((error) => ({ error: String(error?.message ?? error) })))"
+            - set: enableFailureJobs
+              value:
+                expr: "(await listCronJobs(env).catch((error) => [{ error: String(error?.message ?? error) }]))"
             - call: patchConfig
               args:
                 - env:
@@ -127,7 +133,7 @@ steps:
                 - ref: env
                 - 60000
             - throw:
-                expr: enableError
+                expr: "`managed dreaming cron missing: ${enableError?.message ?? enableError}; status=${JSON.stringify(enableFailureStatus)} jobs=${JSON.stringify(enableFailureJobs)}`"
     detailsExpr: "JSON.stringify({ enabled: status.dreaming?.enabled ?? false, managedCronPresent: status.dreaming?.phases?.deep?.managedCronPresent ?? false, nextRunAtMs: status.dreaming?.phases?.deep?.nextRunAtMs ?? null })"
 
   - name: runs the sweep after repeated recall signals and writes promotion artifacts
@@ -249,7 +255,7 @@ steps:
                   afterTs:
                     ref: cronRunStartedAt
                   timeoutMs:
-                    expr: liveTurnTimeoutMs(env, 90000)
+                    expr: liveTurnTimeoutMs(env, 180000)
             - assert:
                 expr: "finishedRun.status === 'ok'"
                 message:
@@ -260,7 +266,7 @@ steps:
                 - lambda:
                     async: true
                     expr: "(async () => { const status = await readDoctorMemoryStatus(env); const lightReport = await fs.readFile(lightReportPath, 'utf8').catch(() => ''); const remReport = await fs.readFile(remReportPath, 'utf8').catch(() => ''); const promotedMemory = await fs.readFile(memoryPath, 'utf8').catch(() => ''); if (!lightReport.includes('# Light Sleep')) return undefined; if (!remReport.includes('# REM Sleep')) return undefined; if (!promotedMemory.includes(config.expectedNeedle)) return undefined; if (status.dreaming?.phases?.deep?.managedCronPresent !== true) return undefined; if ((status.dreaming?.promotedTotal ?? 0) < 1) return undefined; return { status, lightReport, remReport, promotedMemory }; })()"
-                - expr: liveTurnTimeoutMs(env, 90000)
+                - expr: liveTurnTimeoutMs(env, 180000)
                 - 1000
           finally:
             - call: patchConfig

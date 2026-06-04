@@ -23,7 +23,7 @@ export function validatePrivateKey(key: string): Uint8Array {
   // Convert hex string to Uint8Array
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(trimmed.slice(i * 2, i * 2 + 2), 16);
+    bytes[i] = Number.parseInt(trimmed.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
 }
@@ -68,13 +68,11 @@ export function normalizePubkey(input: string): string {
   // npub format - decode to hex
   if (trimmed.startsWith("npub1")) {
     const decoded = nip19.decode(trimmed);
-    if (decoded.type !== "npub") {
+    if (decoded.type !== "npub" || typeof decoded.data !== "string") {
       throw new Error("Invalid npub key");
     }
-    // Convert Uint8Array to hex string
-    return Array.from(decoded.data as unknown as Uint8Array)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    // nip19.decode(npub).data is already the hex pubkey (string), not Uint8Array.
+    return decoded.data.toLowerCase();
   }
 
   // Already hex - validate and return lowercase

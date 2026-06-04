@@ -1,3 +1,4 @@
+// Verifies exec approval allowlist pattern parsing and matching.
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { matchesExecAllowlistPattern } from "./exec-allowlist-pattern.js";
@@ -23,6 +24,36 @@ describe("matchesExecAllowlistPattern", () => {
   ])("handles star patterns for %j", ({ pattern, target, expected }) => {
     expect(matchesExecAllowlistPattern(pattern, target)).toBe(expected);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "matches wildcard paths after collapsing dot segments",
+    () => {
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "/usr/bin/../../bin/sh")).toBe(false);
+      expect(
+        matchesExecAllowlistPattern("/trusted/tools/**", "/trusted/tools/../../etc/shadow"),
+      ).toBe(false);
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "../../etc/shadow")).toBe(false);
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "/usr/bin/./env")).toBe(true);
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "/usr/./bin/./env")).toBe(true);
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "/usr/bin/sub/../env")).toBe(true);
+      expect(matchesExecAllowlistPattern("/usr/bin/*", "/usr/bin/sub/../env")).toBe(true);
+      expect(matchesExecAllowlistPattern("/usr/bin/**", "/usr/bin/sub/tool")).toBe(true);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "keeps wildcard dot-segment matches inside the declared POSIX root",
+    () => {
+      const bases = ["/usr/bin", "/opt/tools", "/srv/bin"] as const;
+      for (const base of bases) {
+        const pattern = `${base}/**`;
+        expect(matchesExecAllowlistPattern(pattern, `${base}/inside/file`)).toBe(true);
+        expect(matchesExecAllowlistPattern(pattern, `${base}/sub/../inside`)).toBe(true);
+        expect(matchesExecAllowlistPattern(pattern, `${base}/../escape`)).toBe(false);
+        expect(matchesExecAllowlistPattern(pattern, `${base}/sub/../../escape`)).toBe(false);
+      }
+    },
+  );
 
   it("expands home-prefix patterns", () => {
     const prevOpenClawHome = process.env.OPENCLAW_HOME;
@@ -53,9 +84,37 @@ describe("matchesExecAllowlistPattern", () => {
     expect(matchesExecAllowlistPattern("/tmp/Allowed-Tool", "/tmp/Allowed-Tool")).toBe(true);
   });
 
+  it.runIf(process.platform === "darwin")("matches macOS /private/var temp aliases", () => {
+    expect(
+      matchesExecAllowlistPattern(
+        "/var/folders/example/bin/tool",
+        "/private/var/folders/example/bin/tool",
+      ),
+    ).toBe(true);
+    expect(
+      matchesExecAllowlistPattern(
+        "/private/var/folders/example/bin/tool",
+        "/var/folders/example/bin/tool",
+      ),
+    ).toBe(true);
+  });
+
   it.runIf(process.platform === "win32")("preserves case-insensitive matching on Windows", () => {
     expect(matchesExecAllowlistPattern("C:/Tools/Allowed-Tool", "c:/tools/allowed-tool")).toBe(
       true,
     );
   });
+
+  it.runIf(process.platform === "win32")(
+    "matches Windows wildcard paths after collapsing dot segments",
+    () => {
+      expect(
+        matchesExecAllowlistPattern("C:/Tools/**", "C:/Tools/../../Windows/System32/cmd.exe"),
+      ).toBe(false);
+      expect(matchesExecAllowlistPattern("C:/Tools/**", String.raw`..\..\Windows\cmd.exe`)).toBe(
+        false,
+      );
+      expect(matchesExecAllowlistPattern("C:/Tools/**", "C:/Tools/bin/../runner.exe")).toBe(true);
+    },
+  );
 });

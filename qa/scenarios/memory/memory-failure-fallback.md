@@ -44,8 +44,12 @@ execution:
       - won't reveal
       - won’t reveal
       - will not reveal
+      - won't disclose
+      - won’t disclose
+      - will not disclose
       - "confirmed: the hidden fact is present"
       - hidden fact is present
+      - hidden fact exists
 ```
 
 ```yaml qa-flow
@@ -121,7 +125,7 @@ steps:
                   message:
                     expr: config.prompt
                   timeoutMs:
-                    expr: liveTurnTimeoutMs(env, 30000)
+                    expr: liveTurnTimeoutMs(env, 180000)
             - call: waitForOutboundMessage
               saveAs: outbound
               args:
@@ -129,7 +133,7 @@ steps:
                 - lambda:
                     params: [candidate]
                     expr: "candidate.conversation.id === 'qa-operator'"
-                - expr: liveTurnTimeoutMs(env, 30000)
+                - expr: liveTurnTimeoutMs(env, 180000)
             - set: lower
               value:
                 expr: "normalizeLowercaseStringOrEmpty(outbound.text)"

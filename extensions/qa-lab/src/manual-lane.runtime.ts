@@ -8,6 +8,7 @@ import type { QaProviderMode } from "./model-selection.js";
 import { startQaProviderServer } from "./providers/server-runtime.js";
 import type { QaThinkingLevel } from "./qa-gateway-config.js";
 import { createQaTransportAdapter, type QaTransportId } from "./qa-transport-registry.js";
+import { resolveQaGatewayTimeoutWithGraceMs } from "./timer-timeouts.js";
 
 type QaManualLaneParams = {
   repoRoot: string;
@@ -19,6 +20,7 @@ type QaManualLaneParams = {
   thinkingDefault?: QaThinkingLevel;
   message: string;
   timeoutMs?: number;
+  replySettleMs?: number;
 };
 
 function resolveManualLaneTimeoutMs(params: {
@@ -105,10 +107,13 @@ export async function runQaManualLane(params: QaManualLaneParams) {
         runId: started.runId,
         timeoutMs,
       },
-      { timeoutMs: timeoutMs + 5_000 },
+      { timeoutMs: resolveQaGatewayTimeoutWithGraceMs(timeoutMs) },
     )) as { status?: string; error?: string };
 
-    await sleep(500);
+    const replySettleMs = params.replySettleMs ?? 500;
+    if (replySettleMs > 0) {
+      await sleep(replySettleMs);
+    }
 
     const reply =
       lab.state

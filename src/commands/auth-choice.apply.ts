@@ -1,8 +1,7 @@
+import { formatCliCommand } from "../cli/command-format.js";
 import { applyAuthChoiceLoadedPluginProvider } from "../plugins/provider-auth-choice.js";
 import type { ApplyAuthChoiceParams, ApplyAuthChoiceResult } from "./auth-choice.apply.types.js";
 import type { AuthChoice } from "./onboard-types.js";
-
-export type { ApplyAuthChoiceParams, ApplyAuthChoiceResult } from "./auth-choice.apply.types.js";
 
 async function normalizeLegacyChoice(
   authChoice: AuthChoice | undefined,
@@ -11,7 +10,7 @@ async function normalizeLegacyChoice(
   if (authChoice === "oauth") {
     return "setup-token";
   }
-  if (typeof authChoice !== "string" || !authChoice.endsWith("-cli")) {
+  if (typeof authChoice !== "string") {
     return authChoice;
   }
   const { normalizeLegacyOnboardAuthChoice } = await import("./auth-choice-legacy.js");
@@ -42,6 +41,25 @@ async function normalizeTokenProviderChoice(params: {
   });
 }
 
+async function formatDeprecatedProviderChoiceError(
+  authChoice: AuthChoice | undefined,
+  params: Pick<ApplyAuthChoiceParams, "config" | "env">,
+): Promise<string | undefined> {
+  if (typeof authChoice !== "string") {
+    return undefined;
+  }
+  const { resolveManifestDeprecatedProviderAuthChoice } =
+    await import("../plugins/provider-auth-choices.js");
+  const deprecatedChoice = resolveManifestDeprecatedProviderAuthChoice(authChoice, {
+    config: params.config,
+    env: params.env,
+  });
+  if (!deprecatedChoice) {
+    return undefined;
+  }
+  return `Auth choice ${JSON.stringify(authChoice)} is no longer supported. Use ${JSON.stringify(deprecatedChoice.choiceId)} instead, or run ${formatCliCommand("openclaw onboard")} to choose interactively.`;
+}
+
 export async function applyAuthChoice(
   params: ApplyAuthChoiceParams,
 ): Promise<ApplyAuthChoiceResult> {
@@ -63,18 +81,29 @@ export async function applyAuthChoice(
     return result;
   }
 
+  const deprecatedProviderChoiceError = await formatDeprecatedProviderChoiceError(
+    normalizedParams.authChoice,
+    {
+      config: normalizedParams.config,
+      env: normalizedParams.env,
+    },
+  );
+  if (deprecatedProviderChoiceError) {
+    throw new Error(deprecatedProviderChoiceError);
+  }
+
   if (normalizedParams.authChoice === "token" || normalizedParams.authChoice === "setup-token") {
     throw new Error(
       [
         `Auth choice "${normalizedParams.authChoice}" was not matched to a provider setup flow.`,
-        'For Anthropic legacy token auth, use "setup-token" with tokenProvider="anthropic" or choose the Anthropic setup-token entry explicitly.',
+        `Run ${formatCliCommand("openclaw models auth login --provider <provider>")} for provider auth, or rerun ${formatCliCommand("openclaw onboard")} to choose interactively.`,
       ].join("\n"),
     );
   }
 
   if (normalizedParams.authChoice === "oauth") {
     throw new Error(
-      'Auth choice "oauth" is no longer supported directly. Use "setup-token" for Anthropic legacy token auth or a provider-specific OAuth entry.',
+      `Auth choice "oauth" is no longer supported directly. Use a provider-specific auth entry, or run ${formatCliCommand("openclaw models auth login --provider <provider>")}.`,
     );
   }
 

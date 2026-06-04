@@ -1,3 +1,4 @@
+/** Tests compact tool metadata formatting for auto-reply progress output. */
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { formatToolAggregate, formatToolPrefix, shortenMeta, shortenPath } from "./tool-meta.js";
@@ -45,12 +46,17 @@ describe("tool meta formatting", () => {
     expect(out).toContain("`~/dir/a.txt`");
   });
 
+  it("uses a longer inline code delimiter when meta contains backticks", () => {
+    const out = formatToolAggregate("fs", ["name `with` ticks"], { markdown: true });
+    expect(out).toBe("🧩 Fs: ``name `with` ticks``");
+  });
+
   it("keeps exec flags outside markdown and moves them to the front", () => {
     vi.stubEnv("HOME", home);
     const out = formatToolAggregate("exec", [`cd ${home}/dir && gemini 2>&1 · elevated`], {
       markdown: true,
     });
-    expect(out).toBe("🛠️ Exec: elevated · `cd ~/dir && gemini 2>&1`");
+    expect(out).toBe("🛠️ elevated · `cd ~/dir && gemini 2>&1`");
   });
 
   it("formats prefixes with default labels", () => {

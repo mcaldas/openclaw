@@ -1,4 +1,11 @@
-import { loadBundledPluginPublicSurfaceModuleSync } from "./facade-loader.js";
+/**
+ * Public SDK facade for browser cleanup and trash operations.
+ */
+import {
+  canLoadActivatedBundledPluginPublicSurface,
+  tryLoadActivatedBundledPluginPublicSurfaceModuleSync,
+} from "./facade-runtime.js";
+export { movePathToTrash, type MovePathToTrashOptions } from "./browser-trash.js";
 
 type CloseTrackedBrowserTabsParams = {
   sessionKeys: Array<string | undefined>;
@@ -16,15 +23,23 @@ function hasRequestedSessionKeys(sessionKeys: Array<string | undefined>): boolea
   return sessionKeys.some((key) => Boolean(key?.trim()));
 }
 
-function loadBrowserMaintenanceSurface(): BrowserMaintenanceSurface {
-  cachedBrowserMaintenanceSurface ??=
-    loadBundledPluginPublicSurfaceModuleSync<BrowserMaintenanceSurface>({
-      dirName: "browser",
-      artifactBasename: "browser-maintenance.js",
-    });
-  return cachedBrowserMaintenanceSurface;
+function loadBrowserMaintenanceSurface(): BrowserMaintenanceSurface | null {
+  const request = {
+    dirName: "browser",
+    artifactBasename: "browser-maintenance.js",
+  };
+  if (!canLoadActivatedBundledPluginPublicSurface(request)) {
+    return null;
+  }
+  if (!cachedBrowserMaintenanceSurface) {
+    cachedBrowserMaintenanceSurface =
+      tryLoadActivatedBundledPluginPublicSurfaceModuleSync<BrowserMaintenanceSurface>(request) ??
+      undefined;
+  }
+  return cachedBrowserMaintenanceSurface ?? null;
 }
 
+/** Closes tracked browser tabs for requested session keys when the browser plugin is active. */
 export async function closeTrackedBrowserTabsForSessions(
   params: CloseTrackedBrowserTabsParams,
 ): Promise<number> {
@@ -32,42 +47,15 @@ export async function closeTrackedBrowserTabsForSessions(
     return 0;
   }
 
-  let surface: BrowserMaintenanceSurface;
+  let surface: BrowserMaintenanceSurface | null;
   try {
     surface = loadBrowserMaintenanceSurface();
   } catch (error) {
     params.onWarn?.(`browser cleanup unavailable: ${String(error)}`);
     return 0;
   }
-  return await surface.closeTrackedBrowserTabsForSessions(params);
-}
-
-export async function movePathToTrash(targetPath: string): Promise<string> {
-  const [
-    { default: fs },
-    { default: os },
-    { default: path },
-    { generateSecureToken },
-    { runExec },
-  ] = await Promise.all([
-    import("node:fs"),
-    import("node:os"),
-    import("node:path"),
-    import("../infra/secure-random.js"),
-    import("../process/exec.js"),
-  ]);
-  try {
-    await runExec("trash", [targetPath], { timeoutMs: 10_000 });
-    return targetPath;
-  } catch {
-    const trashDir = path.join(os.homedir(), ".Trash");
-    fs.mkdirSync(trashDir, { recursive: true });
-    const base = path.basename(targetPath);
-    let dest = path.join(trashDir, `${base}-${Date.now()}`);
-    if (fs.existsSync(dest)) {
-      dest = path.join(trashDir, `${base}-${Date.now()}-${generateSecureToken(6)}`);
-    }
-    fs.renameSync(targetPath, dest);
-    return dest;
+  if (!surface) {
+    return 0;
   }
+  return await surface.closeTrackedBrowserTabsForSessions(params);
 }

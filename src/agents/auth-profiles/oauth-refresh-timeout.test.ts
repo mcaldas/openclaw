@@ -1,14 +1,25 @@
+/**
+ * Tests OAuth refresh timeout invariants.
+ * Guards the relationship between per-refresh hard timeout, stale lock window,
+ * and retry budget.
+ */
 import { describe, expect, it } from "vitest";
 import { OAUTH_REFRESH_CALL_TIMEOUT_MS, OAUTH_REFRESH_LOCK_OPTIONS } from "./constants.js";
 
-// Invariant tests for the two constants that together bound the OAuth
-// refresh critical section. Behavioural tests for the inner `setTimeout`
-// mechanics are deliberately omitted: the implementation is a thin
-// `Promise.race` around `setTimeout`, and exercising it end-to-end requires
-// stepping through nested file-lock I/O that mixes awkwardly with Vitest
-// fake timers. A regression in the timeout wiring would be caught by the
-// #26322 regression test (oauth.concurrent-20-agents.test.ts) because a
-// stuck refresh would time out the whole suite.
+function computeMinimumRetryBudgetMs(): number {
+  let total = 0;
+  for (let attempt = 0; attempt < OAUTH_REFRESH_LOCK_OPTIONS.retries.retries; attempt += 1) {
+    total += Math.min(
+      OAUTH_REFRESH_LOCK_OPTIONS.retries.maxTimeout,
+      Math.max(
+        OAUTH_REFRESH_LOCK_OPTIONS.retries.minTimeout,
+        OAUTH_REFRESH_LOCK_OPTIONS.retries.minTimeout *
+          OAUTH_REFRESH_LOCK_OPTIONS.retries.factor ** attempt,
+      ),
+    );
+  }
+  return total;
+}
 
 describe("OAuth refresh call timeout (invariants)", () => {
   it("OAUTH_REFRESH_CALL_TIMEOUT_MS is strictly below OAUTH_REFRESH_LOCK_OPTIONS.stale", () => {
@@ -40,5 +51,11 @@ describe("OAuth refresh call timeout (invariants)", () => {
     // refresh ceiling (60s) so waiting agents never prematurely reclaim a
     // lock during a legitimate slow-but-successful refresh.
     expect(OAUTH_REFRESH_LOCK_OPTIONS.stale).toBeGreaterThan(60_000);
+  });
+
+  it("OAUTH_REFRESH_LOCK_OPTIONS retry budget outlasts the refresh call timeout", () => {
+    // Waiters should not exhaust their retry budget while a legitimate slow
+    // refresh is still within its allowed runtime budget.
+    expect(computeMinimumRetryBudgetMs()).toBeGreaterThan(OAUTH_REFRESH_CALL_TIMEOUT_MS);
   });
 });

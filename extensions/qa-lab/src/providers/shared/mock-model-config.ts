@@ -14,11 +14,11 @@ function cloneProvider(provider: ModelProviderConfig): ModelProviderConfig {
   };
 }
 
-export function trimTrailingApiV1(baseUrl: string) {
+function trimTrailingApiV1(baseUrl: string) {
   return baseUrl.replace(/\/v1\/?$/i, "");
 }
 
-export function createMockOpenAiResponsesProvider(baseUrl: string): ModelProviderConfig {
+function createMockOpenAiResponsesProvider(baseUrl: string): ModelProviderConfig {
   return {
     baseUrl,
     apiKey: "test",
@@ -28,20 +28,20 @@ export function createMockOpenAiResponsesProvider(baseUrl: string): ModelProvide
     },
     models: [
       {
-        id: "gpt-5.4",
-        name: "gpt-5.4",
+        id: "gpt-5.5",
+        name: "gpt-5.5",
         api: "openai-responses",
-        reasoning: false,
+        reasoning: true,
         input: ["text", "image"],
         cost: ZERO_COST,
         contextWindow: 128_000,
         maxTokens: 4096,
       },
       {
-        id: "gpt-5.4-alt",
-        name: "gpt-5.4-alt",
+        id: "gpt-5.5-alt",
+        name: "gpt-5.5-alt",
         api: "openai-responses",
-        reasoning: false,
+        reasoning: true,
         input: ["text", "image"],
         cost: ZERO_COST,
         contextWindow: 128_000,
@@ -61,7 +61,7 @@ export function createMockOpenAiResponsesProvider(baseUrl: string): ModelProvide
   };
 }
 
-export function createMockAnthropicMessagesProvider(baseUrl: string): ModelProviderConfig {
+function createMockAnthropicMessagesProvider(baseUrl: string): ModelProviderConfig {
   return {
     baseUrl: trimTrailingApiV1(baseUrl),
     apiKey: "test",
@@ -71,14 +71,14 @@ export function createMockAnthropicMessagesProvider(baseUrl: string): ModelProvi
     },
     models: [
       {
-        id: "claude-opus-4-6",
-        name: "claude-opus-4-6",
+        id: "claude-opus-4-8",
+        name: "claude-opus-4-8",
         api: "anthropic-messages",
         reasoning: false,
         input: ["text", "image"],
         cost: ZERO_COST,
-        contextWindow: 200_000,
-        maxTokens: 4096,
+        contextWindow: 1_048_576,
+        maxTokens: 128_000,
       },
       {
         id: "claude-sonnet-4-6",

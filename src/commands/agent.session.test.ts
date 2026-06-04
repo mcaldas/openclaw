@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { withTempHome as withTempHomeBase } from "openclaw/plugin-sdk/test-env";
 import { beforeEach, describe, expect, it } from "vitest";
-import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
 import { resolveAgentDir, resolveSessionAgentId } from "../agents/agent-scope.js";
 import { resolveSession } from "../agents/command/session.js";
 import { clearSessionStoreCacheForTest } from "../config/sessions/store.js";
@@ -126,7 +126,7 @@ describe("agent session resolution", () => {
         main: {
           sessionId: "origin-provider-reset",
           updatedAt: Date.now() - 30 * 60_000,
-          origin: { provider: "discord" },
+          origin: { provider: "quietchat" },
         },
       });
       const cfg = mockConfig(home, store);
@@ -134,7 +134,7 @@ describe("agent session resolution", () => {
         ...cfg.session,
         reset: { mode: "idle", idleMinutes: 10 },
         resetByChannel: {
-          discord: { mode: "idle", idleMinutes: 120 },
+          quietchat: { mode: "idle", idleMinutes: 120 },
         },
       };
 
@@ -150,18 +150,16 @@ describe("agent session resolution", () => {
       const resolution = resolveSession({ cfg, sessionId });
       expect(resolution.sessionKey).toBe(sessionKey);
       const agentId = resolveSessionAgentId({ sessionKey: resolution.sessionKey, config: cfg });
-      expect(
-        buildOutboundSessionContext({
-          cfg,
-          sessionKey: resolution.sessionKey,
-          agentId,
-        }),
-      ).toEqual(
-        expect.objectContaining({
-          key: sessionKey,
-          agentId: "exec",
-        }),
-      );
+      const outboundContext = buildOutboundSessionContext({
+        cfg,
+        sessionKey: resolution.sessionKey,
+        agentId,
+      });
+      if (!outboundContext) {
+        throw new Error("expected outbound session context");
+      }
+      expect(outboundContext.key).toBe(sessionKey);
+      expect(outboundContext.agentId).toBe("exec");
     });
   });
 });

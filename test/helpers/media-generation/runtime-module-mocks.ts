@@ -5,6 +5,8 @@ import type { MusicGenerationProvider } from "../../../src/music-generation/type
 import type { VideoGenerationProvider } from "../../../src/video-generation/types.js";
 import { resetGenerationRuntimeMocks } from "./runtime-test-mocks.js";
 
+// Shared Vitest module mocks for image, music, and video generation runtimes.
+
 type ModelRef = { provider: string; model: string };
 
 const mediaRuntimeMocks = vi.hoisted(() => {
@@ -25,7 +27,7 @@ const mediaRuntimeMocks = vi.hoisted(() => {
     };
   };
   return {
-    createSubsystemLogger: vi.fn(() => ({ debug, warn: vi.fn() })),
+    createSubsystemLogger: vi.fn(() => ({ debug, warn })),
     describeFailoverError: vi.fn(),
     getImageGenerationProvider: vi.fn<
       (providerId: string, config?: OpenClawConfig) => ImageGenerationProvider | undefined
@@ -58,7 +60,21 @@ const mediaRuntimeMocks = vi.hoisted(() => {
     resolveEnvApiKey: vi.fn(() => undefined),
     resolveAgentModelFallbackValues: vi.fn<(value: unknown) => string[]>(() => []),
     resolveAgentModelPrimaryValue: vi.fn<(value: unknown) => string | undefined>(() => undefined),
+    resolveAgentModelTimeoutMsValue: vi.fn<(value: unknown) => number | undefined>((value) => {
+      if (!value || typeof value !== "object" || !("timeoutMs" in value)) {
+        return undefined;
+      }
+      const timeoutMs = (value as { timeoutMs?: unknown }).timeoutMs;
+      return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? Math.floor(timeoutMs)
+        : undefined;
+    }),
     resolveProviderAuthEnvVarCandidates: vi.fn(() => ({})),
+    resolveProviderAuthLookupMaps: vi.fn(() => ({
+      aliasMap: {},
+      envCandidateMap: {},
+      authEvidenceMap: {},
+    })),
     debug,
     warn,
   };
@@ -81,6 +97,7 @@ vi.mock("../../../src/agents/model-auth-env.js", () => ({
 vi.mock("../../../src/config/model-input.js", () => ({
   resolveAgentModelFallbackValues: mediaRuntimeMocks.resolveAgentModelFallbackValues,
   resolveAgentModelPrimaryValue: mediaRuntimeMocks.resolveAgentModelPrimaryValue,
+  resolveAgentModelTimeoutMsValue: mediaRuntimeMocks.resolveAgentModelTimeoutMsValue,
 }));
 vi.mock("../../../src/logging/subsystem.js", () => ({
   createSubsystemLogger: mediaRuntimeMocks.createSubsystemLogger,
@@ -88,6 +105,7 @@ vi.mock("../../../src/logging/subsystem.js", () => ({
 vi.mock("../../../src/secrets/provider-env-vars.js", () => ({
   getProviderEnvVars: mediaRuntimeMocks.getProviderEnvVars,
   resolveProviderAuthEnvVarCandidates: mediaRuntimeMocks.resolveProviderAuthEnvVarCandidates,
+  resolveProviderAuthLookupMaps: mediaRuntimeMocks.resolveProviderAuthLookupMaps,
 }));
 
 vi.mock("../../../src/image-generation/model-ref.js", () => ({
@@ -112,10 +130,12 @@ vi.mock("../../../src/video-generation/provider-registry.js", () => ({
   listVideoGenerationProviders: mediaRuntimeMocks.listVideoGenerationProviders,
 }));
 
+/** Return the hoisted shared media generation runtime mocks. */
 export function getMediaGenerationRuntimeMocks() {
   return mediaRuntimeMocks;
 }
 
+/** Reset image generation runtime mocks to default empty-provider behavior. */
 export function resetImageGenerationRuntimeMocks(): void {
   resetSharedRuntimeImportMocks();
   resetGenerationRuntimeMocks({
@@ -126,6 +146,7 @@ export function resetImageGenerationRuntimeMocks(): void {
   });
 }
 
+/** Reset music generation runtime mocks to default empty-provider behavior. */
 export function resetMusicGenerationRuntimeMocks(): void {
   resetSharedRuntimeImportMocks();
   resetGenerationRuntimeMocks({
@@ -136,6 +157,7 @@ export function resetMusicGenerationRuntimeMocks(): void {
   });
 }
 
+/** Reset video generation runtime mocks to default empty-provider behavior. */
 export function resetVideoGenerationRuntimeMocks(): void {
   resetSharedRuntimeImportMocks();
   resetGenerationRuntimeMocks({
@@ -146,6 +168,7 @@ export function resetVideoGenerationRuntimeMocks(): void {
   });
 }
 
+/** Reset shared auth/failover/logger mocks used by all media generation runtimes. */
 function resetSharedRuntimeImportMocks(): void {
   mediaRuntimeMocks.ensureAuthProfileStore.mockReset();
   mediaRuntimeMocks.ensureAuthProfileStore.mockReturnValue({ version: 1, profiles: {} });

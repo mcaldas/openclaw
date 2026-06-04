@@ -1,3 +1,4 @@
+// Sanitizes command text before it is displayed in approval prompts.
 import { redactSensitiveText, resolveRedactOptions } from "../logging/redact.js";
 import type { ExecApprovalRequestPayload } from "./exec-approvals.js";
 
@@ -19,6 +20,8 @@ const EXEC_APPROVAL_MAX_OUTPUT = 16 * 1024;
 const EXEC_APPROVAL_TRUNCATION_MARKER = "…[truncated]";
 const EXEC_APPROVAL_OVERSIZED_MARKER =
   "[exec approval command exceeds display size limit; full text suppressed]";
+const EXEC_APPROVAL_WARNING_OVERSIZED_MARKER =
+  "[exec approval warning exceeds display size limit; full text suppressed]";
 
 const BYPASS_MASK = "***";
 
@@ -26,15 +29,35 @@ function formatCodePointEscape(char: string): string {
   return `\\u{${char.codePointAt(0)?.toString(16).toUpperCase() ?? "FFFD"}}`;
 }
 
-function escapeInvisibles(text: string): string {
-  return text.replace(EXEC_APPROVAL_INVISIBLE_CHAR_REGEX, formatCodePointEscape);
+function normalizeDisplayLineBreaks(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/[\u2028\u2029]/g, "\n");
 }
 
-function truncateForDisplay(text: string): string {
+function escapeInvisibles(text: string, options?: { preserveLineBreaks?: boolean }): string {
+  return text.replace(EXEC_APPROVAL_INVISIBLE_CHAR_REGEX, (char) =>
+    options?.preserveLineBreaks && char === "\n" ? "\n" : formatCodePointEscape(char),
+  );
+}
+
+/** Sanitized approval text plus size-cap status for callers that need UI affordances. */
+export type SanitizedExecApprovalDisplayText = {
+  /** Redacted, spoof-resistant command or warning text safe for an approval prompt. */
+  text: string;
+  /** True when sanitized output exceeded the display cap and was shortened. */
+  truncated: boolean;
+  /** True when raw input exceeded the hard cap and was replaced with a fixed marker. */
+  oversized: boolean;
+};
+
+function truncateForDisplay(text: string): SanitizedExecApprovalDisplayText {
   if (text.length <= EXEC_APPROVAL_MAX_OUTPUT) {
-    return text;
+    return { text, truncated: false, oversized: false };
   }
-  return text.slice(0, EXEC_APPROVAL_MAX_OUTPUT) + EXEC_APPROVAL_TRUNCATION_MARKER;
+  return {
+    text: text.slice(0, EXEC_APPROVAL_MAX_OUTPUT) + EXEC_APPROVAL_TRUNCATION_MARKER,
+    truncated: true,
+    oversized: false,
+  };
 }
 
 // Build a boolean bitmap of positions in `text` that ANY redaction pattern would match.
@@ -81,11 +104,18 @@ function buildStrippedView(original: string): { stripped: string; strippedToOrig
   return { stripped: strippedChars.join(""), strippedToOrig };
 }
 
-export function sanitizeExecApprovalDisplayText(commandText: string): string {
+function sanitizeExecApprovalDisplayTextInternal(
+  commandText: string,
+  options?: { preserveLineBreaks?: boolean; oversizedMarker?: string },
+): SanitizedExecApprovalDisplayText {
   if (commandText.length > EXEC_APPROVAL_MAX_INPUT) {
     // Refuse to display inputs above the hard cap; anything larger must be approved through
     // another channel. Running redaction on a multi-megabyte payload would be a DoS vector.
-    return EXEC_APPROVAL_OVERSIZED_MARKER;
+    return {
+      text: options?.oversizedMarker ?? EXEC_APPROVAL_OVERSIZED_MARKER,
+      truncated: false,
+      oversized: true,
+    };
   }
   const rawRedacted = redactSensitiveText(commandText, { mode: "tools" });
   const { stripped, strippedToOrig } = buildStrippedView(commandText);
@@ -94,7 +124,7 @@ export function sanitizeExecApprovalDisplayText(commandText: string): string {
   // raw-view redaction is sufficient. Preserve structure and show invisible-character spoof
   // attempts as `\u{...}` escapes.
   if (strippedRedacted === stripped) {
-    return truncateForDisplay(escapeInvisibles(rawRedacted));
+    return truncateForDisplay(escapeInvisibles(rawRedacted, options));
   }
   // Detect bypass by position-bitmap coverage. Run each redaction pattern independently on
   // both views and map stripped-view match positions back to original coordinates. If every
@@ -115,7 +145,7 @@ export function sanitizeExecApprovalDisplayText(commandText: string): string {
     }
   }
   if (!bypassDetected) {
-    return truncateForDisplay(escapeInvisibles(rawRedacted));
+    return truncateForDisplay(escapeInvisibles(rawRedacted, options));
   }
   // Bypass path. Project the stripped-view mask back onto original positions, union with the
   // raw-view mask, and emit a rendering where each contiguous masked run becomes a single
@@ -144,10 +174,39 @@ export function sanitizeExecApprovalDisplayText(commandText: string): string {
     }
     const codePoint = commandText.codePointAt(i) ?? 0xfffd;
     const cp = String.fromCodePoint(codePoint);
-    out += EXEC_APPROVAL_INVISIBLE_CHAR_SINGLE.test(cp) ? formatCodePointEscape(cp) : cp;
+    out +=
+      options?.preserveLineBreaks && cp === "\n"
+        ? cp
+        : EXEC_APPROVAL_INVISIBLE_CHAR_SINGLE.test(cp)
+          ? formatCodePointEscape(cp)
+          : cp;
     i += cp.length;
   }
   return truncateForDisplay(out);
+}
+
+/** Sanitizes exec command text for approval UI without exposing status metadata. */
+export function sanitizeExecApprovalDisplayText(commandText: string): string {
+  return sanitizeExecApprovalDisplayTextInternal(commandText).text;
+}
+
+/**
+ * Sanitizes exec command text for approval UI and reports whether size caps changed it.
+ */
+export function sanitizeExecApprovalDisplayTextWithStatus(
+  commandText: string,
+): SanitizedExecApprovalDisplayText {
+  return sanitizeExecApprovalDisplayTextInternal(commandText);
+}
+
+/**
+ * Sanitizes warning prose for approval UI while preserving real line boundaries.
+ */
+export function sanitizeExecApprovalWarningText(warningText: string): string {
+  return sanitizeExecApprovalDisplayTextInternal(normalizeDisplayLineBreaks(warningText), {
+    preserveLineBreaks: true,
+    oversizedMarker: EXEC_APPROVAL_WARNING_OVERSIZED_MARKER,
+  }).text;
 }
 
 function normalizePreview(commandText: string, commandPreview?: string | null): string | null {
@@ -162,8 +221,11 @@ function normalizePreview(commandText: string, commandPreview?: string | null): 
   return preview;
 }
 
+/** Resolves sanitized command and preview text for exec approval prompts. */
 export function resolveExecApprovalCommandDisplay(request: ExecApprovalRequestPayload): {
+  /** Primary command text rendered in the approval prompt. */
   commandText: string;
+  /** Optional shorter preview, omitted when it would duplicate the primary command text. */
   commandPreview: string | null;
 } {
   const commandTextSource =

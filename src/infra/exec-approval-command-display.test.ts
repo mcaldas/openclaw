@@ -1,7 +1,9 @@
+// Verifies shell command display strings for exec approval prompts.
 import { describe, expect, it } from "vitest";
 import {
   resolveExecApprovalCommandDisplay,
   sanitizeExecApprovalDisplayText,
+  sanitizeExecApprovalWarningText,
 } from "./exec-approval-command-display.js";
 
 describe("sanitizeExecApprovalDisplayText", () => {
@@ -9,14 +11,8 @@ describe("sanitizeExecApprovalDisplayText", () => {
     ["echo hi\u200Bthere", "echo hi\\u{200B}there"],
     ["date\u3164\uFFA0\u115F\u1160가", "date\\u{3164}\\u{FFA0}\\u{115F}\\u{1160}가"],
     ["echo safe\n\rcurl https://example.test", "echo safe\\u{A}\\u{D}curl https://example.test"],
-    [
-      "echo ok\u2028curl https://example.test",
-      "echo ok\\u{2028}curl https://example.test",
-    ],
-    [
-      "echo ok\u2029curl https://example.test",
-      "echo ok\\u{2029}curl https://example.test",
-    ],
+    ["echo ok\u2028curl https://example.test", "echo ok\\u{2028}curl https://example.test"],
+    ["echo ok\u2029curl https://example.test", "echo ok\\u{2029}curl https://example.test"],
   ])("sanitizes exec approval display text for %j", (input, expected) => {
     expect(sanitizeExecApprovalDisplayText(input)).toBe(expected);
   });
@@ -160,6 +156,32 @@ describe("sanitizeExecApprovalDisplayText", () => {
     expect(result).not.toContain("sk-abc123");
     expect(result).not.toContain("456789012345678");
     expect(result).toContain("remainder");
+  });
+});
+
+describe("sanitizeExecApprovalWarningText", () => {
+  it("keeps approval warning prose line breaks readable", () => {
+    const warning =
+      "Diagnostics can include sensitive local logs.\n\nOpenAI Codex harness:\nApproving diagnostics will also send Codex feedback.";
+
+    expect(sanitizeExecApprovalWarningText(warning)).toBe(warning);
+  });
+
+  it("normalizes escaped line separators while still escaping hidden spoofing characters", () => {
+    const warning = "Line one\r\nLine two\u2028Line three\u200B";
+
+    expect(sanitizeExecApprovalWarningText(warning)).toBe(
+      "Line one\nLine two\nLine three\\u{200B}",
+    );
+  });
+
+  it("redacts secrets in warning prose without escaping newlines", () => {
+    const warning = "Token:\nsk-abc123456789012345678";
+    const result = sanitizeExecApprovalWarningText(warning);
+
+    expect(result).toContain("Token:\n");
+    expect(result).not.toContain("sk-abc123456789012345678");
+    expect(result).not.toContain("\\u{A}");
   });
 });
 

@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  makeCatalogEntry,
+  makeChannelSetupEntries,
+  makeMeta,
+} from "./channel-setup.test-helpers.js";
 
-type ChannelMeta = import("../channels/plugins/types.core.js").ChannelMeta;
-type ChannelPluginCatalogEntry = import("../channels/plugins/catalog.js").ChannelPluginCatalogEntry;
 type ListChatChannels = typeof import("../channels/chat-meta.js").listChatChannels;
 type ResolveChannelSetupEntries =
   typeof import("../commands/channel-setup/discovery.js").resolveChannelSetupEntries;
@@ -13,37 +16,7 @@ type NoteChannelPrimerChannels = Parameters<
   typeof import("./channel-setup.status.js").noteChannelPrimer
 >[1];
 
-function makeMeta(id: string, label: string, overrides: Partial<ChannelMeta> = {}): ChannelMeta {
-  return {
-    id: id as ChannelMeta["id"],
-    label,
-    selectionLabel: overrides.selectionLabel ?? label,
-    docsPath: overrides.docsPath ?? `/channels/${id}`,
-    blurb: overrides.blurb ?? "",
-    ...overrides,
-  };
-}
-
-function makeCatalogEntry(
-  id: string,
-  label: string,
-  overrides: Partial<ChannelPluginCatalogEntry> = {},
-): ChannelPluginCatalogEntry {
-  return {
-    id,
-    pluginId: overrides.pluginId ?? id,
-    meta: makeMeta(id, label, overrides.meta),
-    install: overrides.install ?? { npmSpec: `@openclaw/${id}` },
-    ...overrides,
-  };
-}
-
-const listChatChannels = vi.hoisted(() =>
-  vi.fn<ListChatChannels>(() => [
-    makeMeta("discord", "Discord"),
-    makeMeta("bluebubbles", "BlueBubbles"),
-  ]),
-);
+const listChatChannels = vi.hoisted(() => vi.fn<ListChatChannels>(() => []));
 const resolveChannelSetupEntries = vi.hoisted(() =>
   vi.fn<ResolveChannelSetupEntries>(() => ({
     entries: [],
@@ -72,6 +45,7 @@ vi.mock("../channels/registry.js", () => ({
     meta: Parameters<FormatChannelSelectionLine>[0],
     docsLink: Parameters<FormatChannelSelectionLine>[1],
   ) => formatChannelSelectionLine(meta, docsLink),
+  normalizeAnyChannelId: (channelId?: string) => channelId?.trim().toLowerCase() ?? null,
 }));
 
 vi.mock("../commands/channel-setup/discovery.js", () => ({
@@ -88,27 +62,44 @@ vi.mock("../config/channel-configured.js", () => ({
   ) => isChannelConfigured(cfg, channelId),
 }));
 
+// Avoid touching the real `extensions/<id>` tree from unit tests. Status
+// rendering for installable catalog entries asks `bundled-sources` whether
+// a plugin already lives in-tree to decide between
+// "install plugin to enable" vs "bundled · enable to use". For these tests
+// we want the installable-catalog branch unconditionally, so we stub the
+// bundled lookup to "nothing is bundled".
+vi.mock("../plugins/bundled-sources.js", () => ({
+  resolveBundledPluginSources: () => new Map(),
+  findBundledPluginSourceInMap: () => undefined,
+}));
+
 import {
   collectChannelStatus,
   noteChannelPrimer,
+  noteChannelStatus,
   resolveChannelSelectionNoteLines,
   resolveChannelSetupSelectionContributions,
 } from "./channel-setup.status.js";
+
+function requireFirstMockCall<const Calls extends readonly unknown[][]>(
+  calls: Calls,
+  label: string,
+): Calls[number] {
+  const call = calls.at(0);
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return call as Calls[number];
+}
 
 describe("resolveChannelSetupSelectionContributions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listChatChannels.mockReturnValue([
       makeMeta("discord", "Discord"),
-      makeMeta("bluebubbles", "BlueBubbles"),
+      makeMeta("imessage", "iMessage"),
     ]);
-    resolveChannelSetupEntries.mockReturnValue({
-      entries: [],
-      installedCatalogEntries: [],
-      installableCatalogEntries: [],
-      installedCatalogById: new Map(),
-      installableCatalogById: new Map(),
-    });
+    resolveChannelSetupEntries.mockReturnValue(makeChannelSetupEntries());
     formatChannelPrimerLine.mockImplementation(
       (meta: { label: string; blurb: string }) => `${meta.label}: ${meta.blurb}`,
     );
@@ -136,11 +127,11 @@ describe("resolveChannelSetupSelectionContributions", () => {
           },
         },
         {
-          id: "bluebubbles",
+          id: "imessage",
           meta: {
-            id: "bluebubbles",
-            label: "BlueBubbles",
-            selectionLabel: "BlueBubbles (macOS app)",
+            id: "imessage",
+            label: "iMessage",
+            selectionLabel: "iMessage (macOS app)",
           },
         },
       ],
@@ -149,8 +140,8 @@ describe("resolveChannelSetupSelectionContributions", () => {
     });
 
     expect(contributions.map((contribution) => contribution.option.label)).toEqual([
-      "BlueBubbles (macOS app)",
       "Discord (Bot API)",
+      "iMessage (macOS app)",
       "Zalo (Bot API)",
     ]);
   });
@@ -247,13 +238,12 @@ describe("resolveChannelSetupSelectionContributions", () => {
 
   it("sanitizes channel labels in status note lines", async () => {
     listChatChannels.mockReturnValue([makeMeta("discord", "Discord\u001B[31m\nCore\u0007")]);
-    resolveChannelSetupEntries.mockReturnValue({
-      entries: [],
-      installedCatalogEntries: [makeCatalogEntry("matrix", "Matrix\u001B[2K\nPlugin\u0007")],
-      installableCatalogEntries: [makeCatalogEntry("zalo", "Zalo\u001B[2K\nPlugin\u0007")],
-      installedCatalogById: new Map(),
-      installableCatalogById: new Map(),
-    });
+    resolveChannelSetupEntries.mockReturnValue(
+      makeChannelSetupEntries({
+        installedCatalogEntries: [makeCatalogEntry("matrix", "Matrix\u001B[2K\nPlugin\u0007")],
+        installableCatalogEntries: [makeCatalogEntry("zalo", "Zalo\u001B[2K\nPlugin\u0007")],
+      }),
+    );
 
     const summary = await collectChannelStatus({
       cfg: {} as never,
@@ -266,6 +256,67 @@ describe("resolveChannelSetupSelectionContributions", () => {
       "Matrix\\nPlugin: installed",
       "Zalo\\nPlugin: install plugin to enable",
     ]);
+  });
+
+  it("localizes channel status note labels", async () => {
+    const previousLocale = process.env.OPENCLAW_LOCALE;
+    process.env.OPENCLAW_LOCALE = "zh-CN";
+    listChatChannels.mockReturnValue([
+      makeMeta("discord", "Discord"),
+      makeMeta("telegram", "Telegram"),
+    ]);
+    isChannelConfigured.mockImplementation((_, channelId) => channelId === "discord");
+    resolveChannelSetupEntries.mockReturnValue(
+      makeChannelSetupEntries({
+        installedCatalogEntries: [makeCatalogEntry("matrix", "Matrix")],
+        installableCatalogEntries: [makeCatalogEntry("zalo", "Zalo")],
+      }),
+    );
+
+    try {
+      const summary = await collectChannelStatus({
+        cfg: {} as never,
+        accountOverrides: {},
+        installedPlugins: [],
+      });
+
+      expect(summary.statusLines).toEqual([
+        "Discord: 已配置（插件已禁用）",
+        "Telegram: 未配置",
+        "Matrix: 已安装",
+        "Zalo: 安装插件后启用",
+      ]);
+    } finally {
+      if (previousLocale === undefined) {
+        delete process.env.OPENCLAW_LOCALE;
+      } else {
+        process.env.OPENCLAW_LOCALE = previousLocale;
+      }
+    }
+  });
+
+  it("localizes channel status note title", async () => {
+    const previousLocale = process.env.OPENCLAW_LOCALE;
+    process.env.OPENCLAW_LOCALE = "zh-CN";
+    const note = vi.fn(async () => {});
+    listChatChannels.mockReturnValue([makeMeta("discord", "Discord")]);
+    isChannelConfigured.mockReturnValue(true);
+
+    try {
+      await noteChannelStatus({
+        cfg: {} as never,
+        prompter: { note } as never,
+        installedPlugins: [],
+      });
+
+      expect(note).toHaveBeenCalledWith(expect.any(String), "频道状态");
+    } finally {
+      if (previousLocale === undefined) {
+        delete process.env.OPENCLAW_LOCALE;
+      } else {
+        process.env.OPENCLAW_LOCALE = previousLocale;
+      }
+    }
   });
 
   it("sanitizes channel metadata before primer notes", async () => {
@@ -282,42 +333,82 @@ describe("resolveChannelSetupSelectionContributions", () => {
       ] as NoteChannelPrimerChannels,
     );
 
-    expect(formatChannelPrimerLine).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: "bad\\nid",
-        label: "bad\\nid",
-        selectionLabel: "bad\\nid",
-        blurb: "Blurb\\nline",
-      }),
-    );
+    expect(formatChannelPrimerLine).toHaveBeenCalledOnce();
+    const [primerMeta] = requireFirstMockCall(formatChannelPrimerLine.mock.calls, "primer line");
+    expect(primerMeta?.id).toBe("bad\\nid");
+    expect(primerMeta?.label).toBe("bad\\nid");
+    expect(primerMeta?.selectionLabel).toBe("bad\\nid");
+    expect(primerMeta?.blurb).toBe("Blurb\\nline");
     expect(note).toHaveBeenCalledWith(
-      expect.stringContaining("bad\\nid: Blurb\\nline"),
+      [
+        "Inbound DM safety defaults to pairing: unknown senders get a pairing code first.",
+        "Approve with: openclaw pairing approve <channel> <code>",
+        'Open/public DMs require dmPolicy="open" plus allowFrom=["*"].',
+        'For multi-user DMs, isolate sessions with: openclaw config set session.dmScope "per-channel-peer" (or "per-account-channel-peer" for multi-account channels).',
+        "Docs: https://docs.openclaw.ai/channels/pairing",
+        "",
+        "bad\\nid: Blurb\\nline",
+      ].join("\n"),
       "How channels work",
     );
   });
 
+  it("localizes built-in channel primer copy", async () => {
+    const previousLocale = process.env.OPENCLAW_LOCALE;
+    process.env.OPENCLAW_LOCALE = "zh-CN";
+    const note = vi.fn(async () => undefined);
+
+    try {
+      await noteChannelPrimer(
+        { note } as never,
+        [
+          {
+            id: "discord",
+            label: "Discord",
+            blurb: "very well supported right now.",
+          } satisfies NoteChannelPrimerChannels[number],
+        ] as NoteChannelPrimerChannels,
+      );
+    } finally {
+      if (previousLocale === undefined) {
+        delete process.env.OPENCLAW_LOCALE;
+      } else {
+        process.env.OPENCLAW_LOCALE = previousLocale;
+      }
+    }
+
+    expect(formatChannelPrimerLine).toHaveBeenCalledWith(
+      expect.objectContaining({
+        label: "Discord",
+        blurb: "目前支持很完善。",
+      }),
+    );
+    expect(note).toHaveBeenCalledWith(
+      expect.stringContaining("入站 DM 安全默认使用配对"),
+      "频道工作方式",
+    );
+  });
+
   it("sanitizes channel metadata before selection notes", () => {
-    resolveChannelSetupEntries.mockReturnValue({
-      entries: [
-        {
-          id: "zalo",
-          meta: {
+    resolveChannelSetupEntries.mockReturnValue(
+      makeChannelSetupEntries({
+        entries: [
+          {
             id: "zalo",
-            label: "Zalo\u001B[31m\nBot\u0007",
-            selectionLabel: "Zalo",
-            docsPath: "/channels/zalo",
-            docsLabel: "Docs\u001B[2K\nLabel",
-            blurb: "Setup\u001B[2K\nhelp\u0007",
-            selectionDocsPrefix: "Docs\u001B[2K\nPrefix",
-            selectionExtras: ["Extra\u001B[2K\nOne", "\u001B[31m\u0007"],
+            meta: {
+              id: "zalo",
+              label: "Zalo\u001B[31m\nBot\u0007",
+              selectionLabel: "Zalo",
+              docsPath: "/channels/zalo",
+              docsLabel: "Docs\u001B[2K\nLabel",
+              blurb: "Setup\u001B[2K\nhelp\u0007",
+              selectionDocsPrefix: "Docs\u001B[2K\nPrefix",
+              selectionExtras: ["Extra\u001B[2K\nOne", "\u001B[31m\u0007"],
+            },
           },
-        },
-      ],
-      installedCatalogEntries: [],
-      installableCatalogEntries: [],
-      installedCatalogById: new Map(),
-      installableCatalogById: new Map(),
-    });
+        ],
+      }),
+    );
 
     const lines = resolveChannelSelectionNoteLines({
       cfg: {} as never,
@@ -325,16 +416,66 @@ describe("resolveChannelSetupSelectionContributions", () => {
       selection: ["zalo"],
     });
 
-    expect(formatChannelSelectionLine).toHaveBeenCalledWith(
-      expect.objectContaining({
-        label: "Zalo\\nBot",
-        blurb: "Setup\\nhelp",
-        docsLabel: "Docs\\nLabel",
-        selectionDocsPrefix: "Docs\\nPrefix",
-        selectionExtras: ["Extra\\nOne"],
-      }),
-      expect.any(Function),
+    expect(formatChannelSelectionLine).toHaveBeenCalledOnce();
+    const [selectionMeta, docsLink] = requireFirstMockCall(
+      formatChannelSelectionLine.mock.calls,
+      "selection line",
     );
+    expect(selectionMeta?.label).toBe("Zalo\\nBot");
+    expect(selectionMeta?.blurb).toBe("Setup\\nhelp");
+    expect(selectionMeta?.docsLabel).toBe("Docs\\nLabel");
+    expect(selectionMeta?.selectionDocsPrefix).toBe("Docs\\nPrefix");
+    expect(selectionMeta?.selectionExtras).toEqual(["Extra\\nOne"]);
+    if (typeof docsLink !== "function") {
+      throw new Error("Expected docs link formatter");
+    }
+    expect(docsLink("/channels/zalo", "Docs")).toBe("https://docs.openclaw.ai/channels/zalo");
     expect(lines).toEqual(["Zalo\\nBot — Setup\\nhelp"]);
+  });
+
+  it("localizes built-in channel blurbs before selection notes", () => {
+    const previousLocale = process.env.OPENCLAW_LOCALE;
+    process.env.OPENCLAW_LOCALE = "zh-CN";
+    resolveChannelSetupEntries.mockReturnValue(
+      makeChannelSetupEntries({
+        entries: [
+          {
+            id: "feishu",
+            meta: {
+              id: "feishu",
+              label: "Feishu",
+              selectionLabel: "Feishu",
+              docsPath: "/channels/feishu",
+              docsLabel: "feishu",
+              blurb: "飞书/Lark enterprise messaging.",
+            },
+          },
+        ],
+      }),
+    );
+
+    try {
+      const lines = resolveChannelSelectionNoteLines({
+        cfg: {} as never,
+        installedPlugins: [],
+        selection: ["feishu"],
+      });
+
+      expect(formatChannelSelectionLine).toHaveBeenCalledWith(
+        expect.objectContaining({
+          label: "Feishu",
+          blurb: "飞书/Lark 企业消息。",
+          selectionDocsPrefix: "文档：",
+        }),
+        expect.any(Function),
+      );
+      expect(lines).toEqual(["Feishu — 飞书/Lark 企业消息。"]);
+    } finally {
+      if (previousLocale === undefined) {
+        delete process.env.OPENCLAW_LOCALE;
+      } else {
+        process.env.OPENCLAW_LOCALE = previousLocale;
+      }
+    }
   });
 });

@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Bundled browser plugin fixture used by plugin/package tests.
+
 const BROWSER_FIXTURE_MANIFEST = {
   id: "browser",
   enabledByDefault: true,
@@ -43,7 +45,7 @@ const BROWSER_FIXTURE_ENTRY = `module.exports = {
       program.command("browser");
     }, { commands: ["browser"] });
     api.registerGatewayMethod("browser.request", async () => ({ ok: true }), {
-      scope: "operator.write",
+      scope: "operator.admin",
     });
     api.registerService({
       id: "browser-control",
@@ -52,6 +54,7 @@ const BROWSER_FIXTURE_ENTRY = `module.exports = {
   },
 };`;
 
+/** Create a temporary bundled browser plugin fixture and cleanup callback. */
 export function createBundledBrowserPluginFixture(): { rootDir: string; cleanup: () => void } {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-browser-bundled-"));
   const pluginDir = path.join(rootDir, "browser");

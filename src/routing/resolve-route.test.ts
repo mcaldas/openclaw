@@ -138,6 +138,109 @@ describe("resolveAgentRoute", () => {
     });
   });
 
+  test("route binding session dmScope isolates selected direct peers without changing agent", () => {
+    const cfg: OpenClawConfig = {
+      session: { dmScope: "main" },
+      bindings: [
+        {
+          type: "route",
+          agentId: "main",
+          match: {
+            channel: "discord",
+            accountId: "default",
+            peer: { kind: "direct", id: "1497598990336790559" },
+          },
+          session: { dmScope: "per-account-channel-peer" },
+        },
+        {
+          type: "route",
+          agentId: "main",
+          match: {
+            channel: "discord",
+            accountId: "default",
+            peer: { kind: "direct", id: "389224669418618880" },
+          },
+          session: { dmScope: "per-account-channel-peer" },
+        },
+      ],
+    };
+
+    expectResolvedRoute(
+      resolveAgentRoute({
+        cfg,
+        channel: "discord",
+        accountId: "default",
+        peer: { kind: "direct", id: "358611388488351744" },
+      }),
+      {
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        matchedBy: "default",
+        lastRoutePolicy: "main",
+      },
+    );
+
+    expectResolvedRoute(
+      resolveAgentRoute({
+        cfg,
+        channel: "discord",
+        accountId: "default",
+        peer: { kind: "direct", id: "1497598990336790559" },
+      }),
+      {
+        agentId: "main",
+        sessionKey: "agent:main:discord:default:direct:1497598990336790559",
+        matchedBy: "binding.peer",
+        lastRoutePolicy: "session",
+      },
+    );
+
+    expectResolvedRoute(
+      resolveAgentRoute({
+        cfg,
+        channel: "discord",
+        accountId: "default",
+        peer: { kind: "direct", id: "389224669418618880" },
+      }),
+      {
+        agentId: "main",
+        sessionKey: "agent:main:discord:default:direct:389224669418618880",
+        matchedBy: "binding.peer",
+        lastRoutePolicy: "session",
+      },
+    );
+
+    expectResolvedRoute(
+      resolveAgentRoute({
+        cfg,
+        channel: "discord",
+        accountId: "default",
+        peer: { kind: "channel", id: "1494710434396110868" },
+      }),
+      {
+        agentId: "main",
+        sessionKey: "agent:main:discord:channel:1494710434396110868",
+        matchedBy: "default",
+        lastRoutePolicy: "session",
+      },
+    );
+
+    expectResolvedRoute(
+      resolveAgentRoute({
+        cfg,
+        channel: "webchat",
+        accountId: null,
+        peer: null,
+      }),
+      {
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        matchedBy: "default",
+        lastRoutePolicy: "main",
+      },
+    );
+  });
+
   test.each([
     {
       name: "collapses inbound last-route session keys to main when policy is main",
@@ -317,6 +420,18 @@ describe("resolveAgentRoute", () => {
       peer: { kind: "channel", id: 1468834856187203680n as unknown as string },
     });
     expect(route.sessionKey).toBe("agent:main:discord:channel:1468834856187203680");
+  });
+
+  test("preserves mixed-case Signal group ids in route session keys", () => {
+    const mixedGroupId = "VWATodkf2hc8zdOS76q9Tb0+5Bi522E03qLdaQ/9ypg=";
+    const route = resolveAgentRoute({
+      cfg: {},
+      channel: "signal",
+      accountId: null,
+      peer: { kind: "group", id: mixedGroupId },
+    });
+    expect(route.sessionKey).toBe(`agent:main:signal:group:${mixedGroupId}`);
+    expect(route.lastRoutePolicy).toBe("session");
   });
 
   test.each([

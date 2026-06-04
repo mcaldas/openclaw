@@ -25,6 +25,7 @@ export type MemoryReadonlyRecoveryState = {
     progress?: (update: MemorySyncProgressUpdate) => void;
   }) => Promise<void>;
   openDatabase: () => DatabaseSync;
+  closeDatabase: (db: DatabaseSync) => void;
   resetVectorState: () => void;
   ensureSchema: () => void;
   readMeta: () => { vectorDims?: number } | undefined;
@@ -90,7 +91,6 @@ export async function runMemorySyncWithReadonlyRecovery(
 ): Promise<void> {
   try {
     await state.runSync(params);
-    return;
   } catch (err) {
     if (!isMemoryReadonlyDbError(err) || state.closed) {
       throw err;
@@ -100,7 +100,7 @@ export async function runMemorySyncWithReadonlyRecovery(
     state.readonlyRecoveryLastError = reason;
     log.warn(`memory sync readonly handle detected; reopening sqlite connection`, { reason });
     try {
-      state.db.close();
+      state.closeDatabase(state.db);
     } catch {}
     const previousVectorDims = state.vector.dims;
     state.db = state.openDatabase();
@@ -166,7 +166,7 @@ export function enqueueMemoryTargetedSessionSync(
   return state.getQueuedSessionSync() ?? Promise.resolve();
 }
 
-export function _createMemorySyncControlConfigForTests(
+export function createMemorySyncControlConfigForTests(
   workspaceDir: string,
   indexPath: string,
 ): OpenClawConfig {

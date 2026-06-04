@@ -1,23 +1,29 @@
 import {
-  createWebSearchProviderContractFields,
   mergeScopedSearchConfig,
   resolveProviderWebSearchPluginConfig,
   type WebSearchProviderPlugin,
   type WebSearchProviderToolDefinition,
 } from "openclaw/plugin-sdk/provider-web-search-config-contract";
-import { resolvePerplexityRuntimeTransport } from "./perplexity-web-search-provider.shared.js";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  createPerplexityWebSearchProviderBase,
+  resolvePerplexityWebSearchRuntimeMetadata,
+} from "./perplexity-web-search-provider.shared.js";
 
-const PERPLEXITY_CREDENTIAL_PATH = "plugins.entries.perplexity.config.webSearch.apiKey";
+type PerplexityWebSearchRuntime = typeof import("./perplexity-web-search-provider.runtime.js");
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+let perplexityWebSearchRuntimePromise: Promise<PerplexityWebSearchRuntime> | undefined;
+
+function loadPerplexityWebSearchRuntime(): Promise<PerplexityWebSearchRuntime> {
+  perplexityWebSearchRuntimePromise ??= import("./perplexity-web-search-provider.runtime.js");
+  return perplexityWebSearchRuntimePromise;
 }
 
 function createPerplexityParameters(transport?: string): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     query: { type: "string", description: "Search query string." },
     count: {
-      type: "number",
+      type: "integer",
       description: "Number of results to return (1-10).",
       minimum: 1,
       maximum: 10,
@@ -53,13 +59,13 @@ function createPerplexityParameters(transport?: string): Record<string, unknown>
       description: "Native Perplexity Search API only. Domain filter (max 20).",
     };
     properties.max_tokens = {
-      type: "number",
+      type: "integer",
       description: "Native Perplexity Search API only. Total content budget across all results.",
       minimum: 1,
       maximum: 1000000,
     };
     properties.max_tokens_per_page = {
-      type: "number",
+      type: "integer",
       description: "Native Perplexity Search API only. Max tokens extracted per page.",
       minimum: 1,
     };
@@ -95,8 +101,7 @@ function createPerplexityToolDefinition(
         : "Search the web using Perplexity. Runtime routing decides between native Search API and Sonar chat-completions compatibility. Structured filters are available on the native Search API path.",
     parameters: createPerplexityParameters(schemaTransport),
     execute: async (args) => {
-      const { executePerplexitySearch } =
-        await import("./perplexity-web-search-provider.runtime.js");
+      const { executePerplexitySearch } = await loadPerplexityWebSearchRuntime();
       return await executePerplexitySearch(args, searchConfig);
     },
   };
@@ -104,34 +109,8 @@ function createPerplexityToolDefinition(
 
 export function createPerplexityWebSearchProvider(): WebSearchProviderPlugin {
   return {
-    id: "perplexity",
-    label: "Perplexity Search",
-    hint: "Requires Perplexity API key or OpenRouter API key · structured results",
-    onboardingScopes: ["text-inference"],
-    credentialLabel: "Perplexity API key",
-    envVars: ["PERPLEXITY_API_KEY", "OPENROUTER_API_KEY"],
-    placeholder: "pplx-...",
-    signupUrl: "https://www.perplexity.ai/settings/api",
-    docsUrl: "https://docs.openclaw.ai/perplexity",
-    autoDetectOrder: 50,
-    credentialPath: PERPLEXITY_CREDENTIAL_PATH,
-    ...createWebSearchProviderContractFields({
-      credentialPath: PERPLEXITY_CREDENTIAL_PATH,
-      searchCredential: { type: "scoped", scopeId: "perplexity" },
-      configuredCredential: { pluginId: "perplexity" },
-    }),
-    resolveRuntimeMetadata: (ctx) => ({
-      perplexityTransport: resolvePerplexityRuntimeTransport({
-        searchConfig: mergeScopedSearchConfig(
-          ctx.searchConfig,
-          "perplexity",
-          resolveProviderWebSearchPluginConfig(ctx.config, "perplexity"),
-        ),
-        resolvedKey: ctx.resolvedCredential?.value,
-        keySource: ctx.resolvedCredential?.source ?? "missing",
-        fallbackEnvVar: ctx.resolvedCredential?.fallbackEnvVar,
-      }),
-    }),
+    ...createPerplexityWebSearchProviderBase(),
+    resolveRuntimeMetadata: resolvePerplexityWebSearchRuntimeMetadata,
     createTool: (ctx) =>
       createPerplexityToolDefinition(
         mergeScopedSearchConfig(

@@ -4,6 +4,9 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
+  scripts/ios-beta-prepare.sh --build-number 7 [--team-id TEAMID]
+
+Optional custom relay:
   OPENCLAW_PUSH_RELAY_BASE_URL=https://relay.example.com \
     scripts/ios-beta-prepare.sh --build-number 7 [--team-id TEAMID]
 
@@ -26,16 +29,9 @@ VERSION_SYNC_HELPER="${ROOT_DIR}/scripts/ios-sync-versioning.ts"
 
 BUILD_NUMBER=""
 TEAM_ID="${IOS_DEVELOPMENT_TEAM:-}"
-PUSH_TRANSPORT="${OPENCLAW_PUSH_TRANSPORT:-relay}"
-PUSH_DISTRIBUTION="${OPENCLAW_PUSH_DISTRIBUTION:-official}"
-PUSH_APNS_ENVIRONMENT="${OPENCLAW_PUSH_APNS_ENVIRONMENT:-production}"
-PUSH_RELAY_BASE_URL="${OPENCLAW_PUSH_RELAY_BASE_URL:-${IOS_PUSH_RELAY_BASE_URL:-}}"
+DEFAULT_IOS_PUSH_RELAY_BASE_URL="https://ios-push-relay.openclaw.ai"
+PUSH_RELAY_BASE_URL="${OPENCLAW_PUSH_RELAY_BASE_URL:-${IOS_PUSH_RELAY_BASE_URL:-${DEFAULT_IOS_PUSH_RELAY_BASE_URL}}}"
 PUSH_RELAY_BASE_URL_XCCONFIG=""
-APP_BUNDLE_ID="${OPENCLAW_APP_BUNDLE_ID:-ai.openclaw.client}"
-SHARE_BUNDLE_ID="${OPENCLAW_SHARE_BUNDLE_ID:-ai.openclaw.client.share}"
-ACTIVITY_WIDGET_BUNDLE_ID="${OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID:-ai.openclaw.client.activitywidget}"
-WATCH_APP_BUNDLE_ID="${OPENCLAW_WATCH_APP_BUNDLE_ID:-ai.openclaw.client.watchkitapp}"
-WATCH_EXTENSION_BUNDLE_ID="${OPENCLAW_WATCH_EXTENSION_BUNDLE_ID:-ai.openclaw.client.watchkitapp.extension}"
 IOS_VERSION=""
 
 prepare_build_dir() {
@@ -126,21 +122,14 @@ if [[ -z "${TEAM_ID}" ]]; then
   exit 1
 fi
 
-if [[ "${PUSH_TRANSPORT}" == "relay" ]]; then
-  if [[ -z "${PUSH_RELAY_BASE_URL}" ]]; then
-    echo "Missing OPENCLAW_PUSH_RELAY_BASE_URL (or IOS_PUSH_RELAY_BASE_URL) for beta relay registration." >&2
-    exit 1
-  fi
+validate_push_relay_base_url "${PUSH_RELAY_BASE_URL}"
 
-  validate_push_relay_base_url "${PUSH_RELAY_BASE_URL}"
-
-  # `.xcconfig` treats `//` as a comment opener. Break the URL with a helper setting
-  # so Xcode still resolves it back to `https://...` at build time.
-  PUSH_RELAY_BASE_URL_XCCONFIG="$(
-    printf '%s' "${PUSH_RELAY_BASE_URL}" \
-      | sed 's#//#$(OPENCLAW_URL_SLASH)$(OPENCLAW_URL_SLASH)#g'
-  )"
-fi
+# `.xcconfig` treats `//` as a comment opener. Break the URL with a helper setting
+# so Xcode still resolves it back to `https://...` at build time.
+PUSH_RELAY_BASE_URL_XCCONFIG="$(
+  printf '%s' "${PUSH_RELAY_BASE_URL}" \
+    | sed 's#//#$(OPENCLAW_URL_SLASH)$(OPENCLAW_URL_SLASH)#g'
+)"
 
 prepare_build_dir
 
@@ -164,18 +153,18 @@ write_generated_file "${BETA_XCCONFIG}" <<EOF
 OPENCLAW_CODE_SIGN_STYLE = Automatic
 OPENCLAW_DEVELOPMENT_TEAM = ${TEAM_ID}
 OPENCLAW_IOS_SELECTED_TEAM = ${TEAM_ID}
-OPENCLAW_APP_BUNDLE_ID = ${APP_BUNDLE_ID}
-OPENCLAW_SHARE_BUNDLE_ID = ${SHARE_BUNDLE_ID}
-OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ${ACTIVITY_WIDGET_BUNDLE_ID}
-OPENCLAW_WATCH_APP_BUNDLE_ID = ${WATCH_APP_BUNDLE_ID}
-OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ${WATCH_EXTENSION_BUNDLE_ID}
+OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client
+OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.share
+OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.activitywidget
+OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.watchkitapp
+OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.watchkitapp.extension
 OPENCLAW_APP_PROFILE =
 OPENCLAW_SHARE_PROFILE =
-OPENCLAW_PUSH_TRANSPORT = ${PUSH_TRANSPORT}
-OPENCLAW_PUSH_DISTRIBUTION = ${PUSH_DISTRIBUTION}
+OPENCLAW_PUSH_TRANSPORT = relay
+OPENCLAW_PUSH_DISTRIBUTION = official
 OPENCLAW_URL_SLASH = /
 OPENCLAW_PUSH_RELAY_BASE_URL = ${PUSH_RELAY_BASE_URL_XCCONFIG}
-OPENCLAW_PUSH_APNS_ENVIRONMENT = ${PUSH_APNS_ENVIRONMENT}
+OPENCLAW_PUSH_APNS_ENVIRONMENT = production
 EOF
 
 (
