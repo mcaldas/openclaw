@@ -252,8 +252,8 @@ def build_beta_release(context)
     archive_path: archive_path,
     output_directory: output_directory,
     output_name: "OpenClaw-#{version}.ipa",
-    xcargs: "-allowProvisioningUpdates",
-    export_xcargs: "-allowProvisioningUpdates",
+    xcargs: "DEVELOPMENT_TEAM=RDDATBT6Y9",
+    export_xcargs: "DEVELOPMENT_TEAM=RDDATBT6Y9",
     xcodebuild_formatter: "",
     export_options: build_beta_export_options
   )
@@ -352,6 +352,7 @@ platform :ios do
 
     upload_to_testflight(
       api_key: context[:api_key],
+      app_identifier: resolve_beta_app_identifier,
       ipa: build[:ipa_path],
       skip_waiting_for_build_processing: true,
       uses_non_exempt_encryption: false
