@@ -1,46 +1,46 @@
 {
-  "teamId": "FWJYW4S8P8",
-  "signingRepo": "git@github.com:openclaw/apps-signing.git",
+  "teamId": "RDDATBT6Y9",
+  "signingRepo": "https://github.com/mcaldas/apps-signing.git",
   "signingBranch": "main",
   "profileType": "appstore",
-  "appGroupId": "group.ai.openclawfoundation.app.shared",
+  "appGroupId": "group.ai.openclaw.ios.test.mathias-rddatbt6y9.shared",
   "targets": [
     {
       "target": "OpenClaw",
-      "displayName": "OpenClaw",
-      "bundleId": "ai.openclawfoundation.app",
+      "displayName": "OpenClaw Test",
+      "bundleId": "ai.openclaw.ios.test.mathias-rddatbt6y9",
       "platform": "IOS",
       "profileKey": "OPENCLAW_APP_PROFILE",
-      "profileName": "OpenClaw App Store ai.openclawfoundation.app",
+      "profileName": "OpenClaw Test AppStore ai.openclaw.ios.test.mathias-rddatbt6y9",
       "capabilities": ["PUSH_NOTIFICATIONS", "APP_GROUPS"],
-      "appGroups": ["group.ai.openclawfoundation.app.shared"]
+      "appGroups": ["group.ai.openclaw.ios.test.mathias-rddatbt6y9.shared"]
     },
     {
       "target": "OpenClawShareExtension",
-      "displayName": "OpenClaw Share",
-      "bundleId": "ai.openclawfoundation.app.share",
+      "displayName": "OpenClaw Test Share",
+      "bundleId": "ai.openclaw.ios.test.mathias-rddatbt6y9.share",
       "platform": "IOS",
       "profileKey": "OPENCLAW_SHARE_PROFILE",
-      "profileName": "OpenClaw App Store ai.openclawfoundation.app.share",
+      "profileName": "OpenClaw Test AppStore ai.openclaw.ios.test.mathias-rddatbt6y9.share",
       "capabilities": ["APP_GROUPS"],
-      "appGroups": ["group.ai.openclawfoundation.app.shared"]
+      "appGroups": ["group.ai.openclaw.ios.test.mathias-rddatbt6y9.shared"]
     },
     {
       "target": "OpenClawActivityWidget",
-      "displayName": "OpenClaw Activity Widget",
-      "bundleId": "ai.openclawfoundation.app.activitywidget",
+      "displayName": "OpenClaw Test Activity Widget",
+      "bundleId": "ai.openclaw.ios.test.mathias-rddatbt6y9.activitywidget",
       "platform": "IOS",
       "profileKey": "OPENCLAW_ACTIVITY_WIDGET_PROFILE",
-      "profileName": "OpenClaw App Store ai.openclawfoundation.app.activitywidget",
+      "profileName": "OpenClaw Test AppStore ai.openclaw.ios.test.mathias-rddatbt6y9.activitywidget",
       "capabilities": []
     },
     {
       "target": "OpenClawWatchApp",
-      "displayName": "OpenClaw Watch App",
-      "bundleId": "ai.openclawfoundation.app.watchkitapp",
+      "displayName": "OpenClaw Test Watch App",
+      "bundleId": "ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp",
       "platform": "IOS",
       "profileKey": "OPENCLAW_WATCH_APP_PROFILE",
-      "profileName": "OpenClaw App Store ai.openclawfoundation.app.watchkitapp",
+      "profileName": "OpenClaw Test AppStore ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp",
       "capabilities": []
     }
   ]

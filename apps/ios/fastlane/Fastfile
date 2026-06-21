@@ -8,7 +8,7 @@ require "cgi"
 
 default_platform(:ios)
 
-APP_STORE_APP_IDENTIFIER = "ai.openclawfoundation.app"
+APP_STORE_APP_IDENTIFIER = "ai.openclaw.ios.test.mathias-rddatbt6y9"
 DEFAULT_APP_STORE_CONNECT_KEYCHAIN_SERVICE = "openclaw-app-store-connect-key"
 DEFAULT_SNAPSHOT_DEVICES = ["iPhone 16 Pro Max", "iPad Pro 13-inch (M4)"].freeze
 DEFAULT_WATCH_SNAPSHOT_DEVICE = "Apple Watch Ultra 3 (49mm)"

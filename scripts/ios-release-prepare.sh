@@ -28,7 +28,7 @@ VERSION_HELPER="${ROOT_DIR}/scripts/ios-write-version-xcconfig.sh"
 IOS_VERSION_HELPER="${ROOT_DIR}/scripts/ios-version.ts"
 VERSION_SYNC_HELPER="${ROOT_DIR}/scripts/ios-sync-versioning.ts"
 RELEASE_SIGNING_HELPER="${ROOT_DIR}/scripts/ios-release-signing.mjs"
-CANONICAL_TEAM_ID="FWJYW4S8P8"
+CANONICAL_TEAM_ID="RDDATBT6Y9"
 
 BUILD_NUMBER=""
 TEAM_ID="${IOS_DEVELOPMENT_TEAM:-}"
@@ -168,10 +168,10 @@ write_generated_file "${RELEASE_XCCONFIG}" <<EOF
 ${RELEASE_SIGNING_XCCONFIG}
 OPENCLAW_DEVELOPMENT_TEAM = ${TEAM_ID}
 OPENCLAW_IOS_SELECTED_TEAM = ${TEAM_ID}
-OPENCLAW_APP_BUNDLE_ID = ai.openclawfoundation.app
-OPENCLAW_SHARE_BUNDLE_ID = ai.openclawfoundation.app.share
-OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclawfoundation.app.activitywidget
-OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclawfoundation.app.watchkitapp
+OPENCLAW_APP_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9
+OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.share
+OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.activitywidget
+OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp
 OPENCLAW_APNS_ENTITLEMENT_ENVIRONMENT = production
 OPENCLAW_PUSH_TRANSPORT = relay
 OPENCLAW_PUSH_DISTRIBUTION = official
