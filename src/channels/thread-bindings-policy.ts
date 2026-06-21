@@ -1,3 +1,4 @@
+// Thread-binding policy resolution for channel/account session spawning.
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -9,10 +10,7 @@ import {
 import { getLoadedChannelPlugin } from "./plugins/index.js";
 import { resolveBundledChannelThreadBindingDefaultPlacement } from "./plugins/thread-binding-api.js";
 
-export {
-  resolveThreadBindingLifecycle,
-  type ThreadBindingLifecycleRecord,
-} from "../shared/thread-binding-lifecycle.js";
+export { resolveThreadBindingLifecycle } from "../shared/thread-binding-lifecycle.js";
 
 const DEFAULT_THREAD_BINDING_IDLE_HOURS = 24;
 const DEFAULT_THREAD_BINDING_MAX_AGE_HOURS = 0;
@@ -45,7 +43,7 @@ export type ThreadBindingSpawnPolicy = {
 };
 
 /** Starting transcript mode for a spawned thread-bound session. */
-export type ThreadBindingSpawnContext = "isolated" | "fork";
+type ThreadBindingSpawnContext = "isolated" | "fork";
 
 function normalizeChannelId(value: string | undefined | null): string {
   return normalizeLowercaseStringOrEmpty(value);

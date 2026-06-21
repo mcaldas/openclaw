@@ -1,3 +1,8 @@
+/**
+ * Shared media generation list/status actions.
+ *
+ * Builds provider list output, active-task status, and duplicate-guard responses for image/video/music tools.
+ */
 import {
   listMediaGenerationProviderModels,
   synthesizeMediaGenerationCatalogEntries,
@@ -8,12 +13,6 @@ import { getProviderEnvVars } from "../../secrets/provider-env-vars.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { isCapabilityProviderConfigured } from "./media-tool-shared.js";
 
-/**
- * Shared list/status action builders for media generation tools.
- *
- * The image, video, and music tools share provider list output plus active-task
- * status/duplicate-guard responses.
- */
 type MediaGenerateActionResult = {
   content: Array<{ type: "text"; text: string }>;
   details: Record<string, unknown>;
@@ -124,7 +123,7 @@ export function createMediaGenerateProviderListActionResult<
   };
 }
 
-/** Creates status and duplicate-guard action helpers for a media generation task type. */
+/** Creates status action helpers for a media generation task type. */
 export function createMediaGenerateTaskStatusActions<Task>(params: {
   inactiveText: string;
   findActiveTask: (sessionKey?: string) => Task | undefined;
@@ -136,15 +135,6 @@ export function createMediaGenerateTaskStatusActions<Task>(params: {
       return createMediaGenerateStatusActionResult({
         sessionKey,
         inactiveText: params.inactiveText,
-        findActiveTask: params.findActiveTask,
-        buildStatusText: params.buildStatusText,
-        buildStatusDetails: params.buildStatusDetails,
-      });
-    },
-
-    createDuplicateGuardResult(sessionKey?: string): MediaGenerateActionResult | undefined {
-      return createMediaGenerateDuplicateGuardResult({
-        sessionKey,
         findActiveTask: params.findActiveTask,
         buildStatusText: params.buildStatusText,
         buildStatusDetails: params.buildStatusDetails,
@@ -174,32 +164,6 @@ function createMediaGenerateStatusActionResult<Task>(params: {
     content: [{ type: "text", text: params.buildStatusText(activeTask) }],
     details: {
       action: "status",
-      ...params.buildStatusDetails(activeTask),
-    },
-  };
-}
-
-function createMediaGenerateDuplicateGuardResult<Task>(params: {
-  sessionKey?: string;
-  findActiveTask: (sessionKey?: string) => Task | undefined;
-  buildStatusText: TaskStatusTextBuilder<Task>;
-  buildStatusDetails: (task: Task) => Record<string, unknown>;
-}): MediaGenerateActionResult | undefined {
-  const activeTask = params.findActiveTask(params.sessionKey);
-  if (!activeTask) {
-    return undefined;
-  }
-  // Duplicate guard returns the active status payload so callers can show current progress.
-  return {
-    content: [
-      {
-        type: "text",
-        text: params.buildStatusText(activeTask, { duplicateGuard: true }),
-      },
-    ],
-    details: {
-      action: "status",
-      duplicateGuard: true,
       ...params.buildStatusDetails(activeTask),
     },
   };

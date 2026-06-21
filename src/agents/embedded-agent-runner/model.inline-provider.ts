@@ -1,3 +1,6 @@
+/**
+ * Converts inline provider model config into runtime model definitions.
+ */
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import type { ModelDefinitionConfig, ModelProviderConfig } from "../../config/types.js";
 import { normalizeGoogleApiBaseUrl } from "../../infra/google-api-base-url.js";
@@ -13,7 +16,7 @@ import {
 /**
  * Normalizes inline `models.providers` config into runtime model entries.
  */
-export type InlineModelEntry = Omit<ModelDefinitionConfig, "api"> & {
+type InlineModelEntry = Omit<ModelDefinitionConfig, "api"> & {
   api?: Api;
   provider: string;
   baseUrl?: string;

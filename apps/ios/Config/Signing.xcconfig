@@ -1,19 +1,17 @@
 // Shared iOS signing defaults for local development + CI.
 #include "Version.xcconfig"
 
-OPENCLAW_IOS_DEFAULT_TEAM = RDDATBT6Y9
+OPENCLAW_IOS_DEFAULT_TEAM = FWJYW4S8P8
 OPENCLAW_IOS_SELECTED_TEAM = $(OPENCLAW_IOS_DEFAULT_TEAM)
 OPENCLAW_DEVELOPMENT_TEAM = $(OPENCLAW_IOS_SELECTED_TEAM)
-OPENCLAW_CODE_SIGN_STYLE = Manual
-OPENCLAW_APP_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9
-OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.share
-OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp
-OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp.extension
-OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.ios.test.mathias-rddatbt6y9.activity-widget
-OPENCLAW_APP_PROFILE = ai.openclaw.ios.test.mathias-rddatbt6y9 AppStore
-OPENCLAW_SHARE_PROFILE = ai.openclaw.ios.test.mathias-rddatbt6y9.share AppStore
-OPENCLAW_WATCH_APP_PROFILE = ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp AppStore
-OPENCLAW_WATCH_EXTENSION_PROFILE = ai.openclaw.ios.test.mathias-rddatbt6y9.watchkitapp.extension AppStore
+OPENCLAW_CODE_SIGN_STYLE = Automatic
+OPENCLAW_CODE_SIGN_IDENTITY = Apple Development
+OPENCLAW_APP_BUNDLE_ID = ai.openclawfoundation.app
+OPENCLAW_APP_GROUP_ID = group.ai.openclawfoundation.app.shared
+OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclawfoundation.app.watchkitapp
+OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclawfoundation.app.activitywidget
+OPENCLAW_ACTIVITY_WIDGET_PROFILE =
+OPENCLAW_WATCH_APP_PROFILE =
 
 // Local contributors can override this by running scripts/ios-configure-signing.sh.
 // Keep include after defaults: xcconfig is evaluated top-to-bottom.
@@ -21,7 +19,7 @@ OPENCLAW_WATCH_EXTENSION_PROFILE = ai.openclaw.ios.test.mathias-rddatbt6y9.watch
 #include? "../LocalSigning.xcconfig"
 
 CODE_SIGN_STYLE = $(OPENCLAW_CODE_SIGN_STYLE)
-CODE_SIGN_IDENTITY = Apple Distribution
+CODE_SIGN_IDENTITY = $(OPENCLAW_CODE_SIGN_IDENTITY)
 DEVELOPMENT_TEAM = $(OPENCLAW_DEVELOPMENT_TEAM)
 
 // Let Xcode manage provisioning for the selected local team unless a local override pins one.

@@ -1,3 +1,8 @@
+/**
+ * Bundled channel plugin contract loader.
+ *
+ * Loads public plugin surfaces and directory contract artifacts without reaching into private sources.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,8 +14,6 @@ import { listBundledChannelPluginIds as listCatalogBundledChannelPluginIds } fro
 import type { ChannelId } from "../../channel-id.types.js";
 import type { ChannelPlugin } from "../../types.js";
 
-// Loads bundled channel plugin public surfaces for core contract tests without
-// reaching into extension-private source paths.
 type ChannelPluginApiModule = Record<string, unknown>;
 type ChannelDirectoryContractModule = Record<string, unknown>;
 

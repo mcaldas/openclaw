@@ -1,3 +1,6 @@
+/**
+ * Builds plugin hook context metadata for native agent harness events.
+ */
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { DiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
 import type {
@@ -12,7 +15,7 @@ import type {
  * construction input so hooks do not accidentally depend on mutable raw configuration.
  */
 export type AgentHarnessHookContext = {
-  runId: string;
+  runId?: string;
   trace?: DiagnosticTraceContext;
   jobId?: string;
   agentId?: string;
@@ -22,6 +25,9 @@ export type AgentHarnessHookContext = {
   modelProviderId?: string;
   modelId?: string;
   messageProvider?: string;
+  channel?: string;
+  chatId?: string;
+  senderId?: string;
   trigger?: string;
   channelId?: string;
   contextTokenBudget?: number;
@@ -33,7 +39,7 @@ export type AgentHarnessHookContext = {
 /** Builds the sparse hook context object passed to agent harness plugin hooks. */
 export function buildAgentHookContext(params: AgentHarnessHookContext): PluginHookAgentContext {
   return {
-    runId: params.runId,
+    ...(params.runId ? { runId: params.runId } : {}),
     ...(params.trace ? { trace: params.trace } : {}),
     ...(params.jobId ? { jobId: params.jobId } : {}),
     ...(params.agentId ? { agentId: params.agentId } : {}),
@@ -43,6 +49,9 @@ export function buildAgentHookContext(params: AgentHarnessHookContext): PluginHo
     ...(params.modelProviderId ? { modelProviderId: params.modelProviderId } : {}),
     ...(params.modelId ? { modelId: params.modelId } : {}),
     ...(params.messageProvider ? { messageProvider: params.messageProvider } : {}),
+    ...(params.channel ? { channel: params.channel } : {}),
+    ...(params.chatId ? { chatId: params.chatId } : {}),
+    ...(params.senderId ? { senderId: params.senderId } : {}),
     ...(params.trigger ? { trigger: params.trigger } : {}),
     ...(params.channelId ? { channelId: params.channelId } : {}),
     ...(params.contextTokenBudget ? { contextTokenBudget: params.contextTokenBudget } : {}),

@@ -1,3 +1,8 @@
+/**
+ * OpenClaw-owned tool registration filters.
+ *
+ * Keeps optional tool gating separate from tool construction so config and execution contracts decide exposure.
+ */
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isStrictAgenticExecutionContractActive } from "./execution-contract.js";
@@ -18,7 +23,7 @@ export function collectPresentOpenClawTools(
 }
 
 /** Resolves the default update_plan switch from explicit config or strict execution contract. */
-export function isUpdatePlanToolEnabledForOpenClawTools(params: {
+function isUpdatePlanToolEnabledForOpenClawTools(params: {
   config?: OpenClawConfig;
   agentSessionKey?: string;
   agentId?: string | null;

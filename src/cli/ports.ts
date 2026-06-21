@@ -1,8 +1,10 @@
+// Port inspection and force-free helpers used by gateway run/install flows.
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { formatErrorMessage } from "../infra/errors.js";
 import { resolveLsofCommandSync } from "../infra/ports-lsof.js";
 import { tryListenOnPort } from "../infra/ports-probe.js";
+import { getWindowsSystem32ExePath } from "../infra/windows-install-roots.js";
 import { resolvePositiveTimerTimeoutMs, resolveTimerTimeoutMs } from "../shared/number-coercion.js";
 import { sleep } from "../utils.js";
 
@@ -62,6 +64,7 @@ function getErrnoCode(err: unknown): string | undefined {
 }
 
 function isRecoverableLsofError(err: unknown): boolean {
+  // Permission or missing-binary failures can fall back to fuser on Linux.
   const code = getErrnoCode(err);
   if (code === "ENOENT" || code === "EACCES" || code === "EPERM") {
     return true;
@@ -163,7 +166,9 @@ export function parseLsofOutput(output: string): PortProcess[] {
 export function listPortListeners(port: number): PortProcess[] {
   if (process.platform === "win32") {
     try {
-      const out = execFileSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf-8" });
+      const out = execFileSync(getWindowsSystem32ExePath("netstat.exe"), ["-ano", "-p", "TCP"], {
+        encoding: "utf-8",
+      });
       const lines = out.split(/\r?\n/).filter(Boolean);
       const results: PortProcess[] = [];
       for (const line of lines) {

@@ -1,3 +1,6 @@
+/**
+ * Plans which core, bundle MCP, and bundle LSP tools an attempt should build.
+ */
 import { TOOL_NAME_SEPARATOR } from "../../agent-bundle-mcp-names.js";
 import type { OpenClawCodingToolConstructionPlan } from "../../agent-tools.js";
 import { isToolAllowedByPolicyName } from "../../tool-policy-match.js";
@@ -224,11 +227,6 @@ export function resolveEmbeddedAttemptToolConstructionPlan(params: {
     ...(toolsAllow ? { runtimeToolAllowlist: toolsAllow } : {}),
     codingToolConstructionPlan,
   };
-}
-
-/** Returns whether the allowlist requires any built-in coding/OpenClaw tools. */
-export function shouldBuildCoreCodingToolsForAllowlist(toolsAllow?: string[]): boolean {
-  return resolveEmbeddedAttemptToolConstructionPlan({ toolsAllow }).includeCoreTools;
 }
 
 /**

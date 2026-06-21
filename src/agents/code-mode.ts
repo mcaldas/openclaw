@@ -1,3 +1,7 @@
+/**
+ * Host-side Code Mode controller for isolated QuickJS execution with bridged
+ * tool search/call/yield support.
+ */
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -18,6 +22,7 @@ import {
   isCodeModeControlTool,
   markCodeModeControlTool,
 } from "./code-mode-control-tools.js";
+import { toCodeModeJsonSafe } from "./code-mode-json.js";
 import {
   createCodeModeApiVirtualFiles,
   createCodeModeNamespaceRuntime,
@@ -52,8 +57,6 @@ export {
   isCodeModeControlTool,
 } from "./code-mode-control-tools.js";
 
-// Host-side Code Mode controller. It compacts tool catalogs, starts the QuickJS
-// worker, stores suspended snapshots, and resumes pending bridged tool calls.
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
@@ -194,6 +197,7 @@ function readLanguages(value: unknown): CodeModeLanguage[] {
   return languages.length > 0 ? uniqueValues(languages) : ["javascript", "typescript"];
 }
 
+/** Resolves Code Mode runtime limits and language support from config. */
 export function resolveCodeModeConfig(config?: OpenClawConfig, agentId?: string): CodeModeConfig {
   const raw = readCodeModeRawConfig(config, agentId);
   const maxSearchLimit = clampInteger(
@@ -284,37 +288,8 @@ function reserveActiveRunSlot(): () => void {
   };
 }
 
-function toJsonSafe(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? null : (JSON.parse(serialized) as unknown);
-  } catch {
-    if (value instanceof Error) {
-      return { name: value.name, message: value.message };
-    }
-    if (value === null) {
-      return null;
-    }
-    switch (typeof value) {
-      case "string":
-      case "number":
-      case "boolean":
-        return value;
-      case "bigint":
-      case "symbol":
-      case "function":
-        return String(value);
-      default:
-        return Object.prototype.toString.call(value);
-    }
-  }
-}
-
 function jsonByteLength(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(toJsonSafe(value)) ?? "null", "utf8");
+  return Buffer.byteLength(JSON.stringify(toCodeModeJsonSafe(value)) ?? "null", "utf8");
 }
 
 class CodeModeLimitError extends ToolInputError {
@@ -597,7 +572,7 @@ async function runBridgeRequest(params: {
         break;
       }
     }
-    return { id: params.request.id, ok: true, value: toJsonSafe(value) };
+    return { id: params.request.id, ok: true, value: toCodeModeJsonSafe(value) };
   } catch (error) {
     return { id: params.request.id, ok: false, error: errorMessage(error) };
   }
@@ -654,10 +629,15 @@ async function runCodeModeWorker(
   timeoutMs: number,
   workerUrl?: URL,
 ): Promise<CodeModeWorkerResult> {
+  const resolvedWorkerUrl = workerUrl ?? codeModeWorkerUrl();
+  const sourceWorkerExecArgv = resolvedWorkerUrl.pathname.endsWith(".ts")
+    ? ["--import", "tsx"]
+    : undefined;
   let worker: Worker;
   try {
-    worker = new Worker(workerUrl ?? codeModeWorkerUrl(), {
+    worker = new Worker(resolvedWorkerUrl, {
       workerData,
+      execArgv: sourceWorkerExecArgv,
     });
   } catch (error) {
     return failedCodeModeWorkerResult(error, "runtime_unavailable");
@@ -1262,6 +1242,7 @@ export function addClientToolsToCodeModeCatalog(params: {
   });
 }
 
+/** Test-only hooks and state accessors for Code Mode worker orchestration. */
 export const testing = {
   activeRuns,
   resumingRunIds,

@@ -1,3 +1,8 @@
+/**
+ * Channel-scoped model override resolver.
+ *
+ * Matches conversation ids, parent sessions, and wildcard config entries to model overrides.
+ */
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -22,7 +27,7 @@ import {
 } from "./plugins/session-conversation.js";
 
 /** Resolved model override for a channel conversation plus the config key that matched. */
-export type ChannelModelOverride = {
+type ChannelModelOverride = {
   channel: string;
   model: string;
   matchKey?: string;

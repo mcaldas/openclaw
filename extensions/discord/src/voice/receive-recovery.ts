@@ -1,3 +1,4 @@
+// Discord plugin module implements receive recovery behavior.
 import { OpusError } from "libopus-wasm";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
 

@@ -1,3 +1,4 @@
+// Ci Node Test Plan tests cover ci node test plan script behavior.
 import { existsSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import fg from "fast-glob";
@@ -176,6 +177,32 @@ describe("scripts/lib/ci-node-test-plan.mjs", () => {
     expect(requiresDistShardNames).toEqual(["core-support-boundary"]);
   });
 
+  it("splits tooling checks independently from built artifacts", () => {
+    const toolingShards = createNodeTestShards().filter((shard) =>
+      shard.shardName.startsWith("core-tooling"),
+    );
+
+    expect(toolingShards).toEqual([
+      {
+        checkName: "checks-node-core-tooling",
+        configs: [
+          "test/vitest/vitest.tooling.config.ts",
+          "test/vitest/vitest.tooling-isolated.config.ts",
+        ],
+        requiresDist: false,
+        runner: "blacksmith-8vcpu-ubuntu-2404",
+        shardName: "core-tooling",
+      },
+      {
+        checkName: "checks-node-core-tooling-docker",
+        configs: ["test/vitest/vitest.tooling-docker.config.ts"],
+        requiresDist: false,
+        runner: "blacksmith-8vcpu-ubuntu-2404",
+        shardName: "core-tooling-docker",
+      },
+    ]);
+  });
+
   it("assigns Blacksmith runners to every core node shard", () => {
     const shards = createNodeTestShards();
 
@@ -289,6 +316,12 @@ describe("scripts/lib/ci-node-test-plan.mjs", () => {
         requiresDist: false,
         runner: "blacksmith-4vcpu-ubuntu-2404",
         shardName: "core-runtime-infra-heartbeat-runner",
+      },
+      {
+        configs: ["test/vitest/vitest.infra.config.ts"],
+        requiresDist: false,
+        runner: "blacksmith-4vcpu-ubuntu-2404",
+        shardName: "core-runtime-infra-misc",
       },
       {
         configs: ["test/vitest/vitest.infra.config.ts"],
@@ -446,6 +479,7 @@ describe("scripts/lib/ci-node-test-plan.mjs", () => {
       "core-runtime-infra-gateway-watch",
       "core-runtime-infra-heartbeat-core",
       "core-runtime-infra-heartbeat-runner",
+      "core-runtime-infra-misc",
       "core-runtime-infra-misc-dedupe-disk",
       "core-runtime-infra-misc-os",
       "core-runtime-infra-misc-values",

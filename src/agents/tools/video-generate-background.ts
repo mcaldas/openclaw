@@ -1,14 +1,14 @@
-import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { AgentGeneratedAttachment } from "../generated-attachments.js";
+/**
+ * Video-generation background task lifecycle adapters.
+ *
+ * Specializes the shared media background runner with video status text and completion metadata.
+ */
 import { VIDEO_GENERATION_TASK_KIND } from "../video-generation-task-status.js";
 import {
   createMediaGenerationTaskLifecycle,
   type MediaGenerationTaskHandle,
 } from "./media-generate-background-shared.js";
 
-/**
- * Video-generation task lifecycle adapters over the shared media background runner.
- */
 export type VideoGenerationTaskHandle = MediaGenerationTaskHandle;
 
 /** Shared lifecycle configured with video-specific status text and event metadata. */
@@ -43,17 +43,3 @@ export const completeVideoGenerationTaskRun = (
 export const failVideoGenerationTaskRun = (
   ...params: Parameters<typeof videoGenerationTaskLifecycle.failTaskRun>
 ) => videoGenerationTaskLifecycle.failTaskRun(...params);
-
-/** Wakes the waiting session turn with final video-generation output. */
-export async function wakeVideoGenerationTaskCompletion(params: {
-  config?: OpenClawConfig;
-  handle: VideoGenerationTaskHandle | null;
-  status: "ok" | "error";
-  statusLabel: string;
-  result: string;
-  attachments?: AgentGeneratedAttachment[];
-  mediaUrls?: string[];
-  statsLine?: string;
-}) {
-  return await videoGenerationTaskLifecycle.wakeTaskCompletion(params);
-}

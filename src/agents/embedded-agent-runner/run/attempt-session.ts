@@ -1,9 +1,12 @@
+/**
+ * Creates embedded-agent sessions with the runner resource loader installed.
+ */
 import type { CreateAgentSessionOptions } from "../../sessions/index.js";
 
 /**
  * Session construction bridge for embedded-attempt runs.
  */
-export type EmbeddedAgentSessionOptions = {
+type EmbeddedAgentSessionOptions = {
   cwd: string;
   agentDir: string;
   authStorage: unknown;
@@ -15,6 +18,7 @@ export type EmbeddedAgentSessionOptions = {
   sessionManager: unknown;
   settingsManager: unknown;
   resourceLoader: unknown;
+  resolveDeferredTool?: CreateAgentSessionOptions["resolveDeferredTool"];
   withSessionWriteLock?: CreateAgentSessionOptions["withSessionWriteLock"];
 };
 

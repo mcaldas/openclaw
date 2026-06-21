@@ -1,6 +1,11 @@
+/**
+ * Per-path queued append writer for logs and transcripts.
+ *
+ * Serializes writes, bounds queue/file growth, and exposes diagnostics for stuck-write probes.
+ */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { appendRegularFile, resolveRegularFileAppendFlags } from "../infra/fs-safe.js";
+import { appendRegularFile } from "../infra/fs-safe.js";
 
 /**
  * Serializes append-only writes per file path.
@@ -31,9 +36,6 @@ type QueuedFileWriterOptions = {
   maxQueuedBytes?: number;
   yieldBeforeWrite?: boolean;
 };
-
-/** Safe append flags used by queued writers. */
-export const resolveQueuedFileAppendFlags = resolveRegularFileAppendFlags;
 
 async function safeAppendFile(
   filePath: string,

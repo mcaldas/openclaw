@@ -1,3 +1,6 @@
+/**
+ * Prepares bundled MCP configuration for CLI runner backends.
+ */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -12,10 +15,8 @@ import { loadMergedBundleMcpConfig, toCliBundleMcpServerConfig } from "../bundle
 import { isRecord } from "./bundle-mcp-adapter-shared.js";
 import { findClaudeMcpConfigPath, injectClaudeMcpConfigArgs } from "./bundle-mcp-claude.js";
 import { injectCodexMcpConfigArgs } from "./bundle-mcp-codex.js";
-import { writeGeminiSystemSettings } from "./bundle-mcp-gemini.js";
+import { writeGeminiMcpCaptureSettings, writeGeminiSystemSettings } from "./bundle-mcp-gemini.js";
 
-// Prepares bundle MCP configuration for CLI backends. Each backend receives MCP
-// config in its native form while OpenClaw records stable hashes for resume checks.
 type PreparedCliBundleMcpConfig = {
   backend: CliBackendConfig;
   cleanup?: () => Promise<void>;
@@ -195,4 +196,27 @@ export async function prepareCliBundleMcpConfig(params: {
     mergedConfig,
     env: params.env,
   });
+}
+
+/** Prepares a per-attempt capture token without changing resume compatibility hashes. */
+export async function prepareCliBundleMcpCaptureAttempt(params: {
+  mode?: CliBundleMcpMode;
+  env?: Record<string, string>;
+  captureKey?: string;
+}): Promise<{ env?: Record<string, string>; cleanup?: () => Promise<void> }> {
+  if (!params.captureKey) {
+    return { env: params.env };
+  }
+  if (resolveBundleMcpMode(params.mode) === "gemini-system-settings") {
+    return await writeGeminiMcpCaptureSettings({
+      inheritedEnv: params.env,
+      captureKey: params.captureKey,
+    });
+  }
+  return {
+    env: {
+      ...params.env,
+      OPENCLAW_MCP_CLI_CAPTURE_KEY: params.captureKey,
+    },
+  };
 }

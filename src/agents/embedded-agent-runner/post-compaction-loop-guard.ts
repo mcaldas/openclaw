@@ -1,3 +1,6 @@
+/**
+ * Guards against repeated tool-loop compactions that never make progress.
+ */
 import type { ToolLoopPostCompactionGuardConfig } from "../../config/types.tools.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 
@@ -11,13 +14,13 @@ const log = createSubsystemLogger("agents/post-compaction-guard");
 
 const DEFAULT_WINDOW_SIZE = 3;
 
-export type PostCompactionGuardObservation = {
+type PostCompactionGuardObservation = {
   toolName: string;
   argsHash: string;
   resultHash: string;
 };
 
-export type PostCompactionGuardVerdict =
+type PostCompactionGuardVerdict =
   | { shouldAbort: false; armed: boolean; remainingAttempts: number }
   | {
       shouldAbort: true;
@@ -29,7 +32,7 @@ export type PostCompactionGuardVerdict =
       message: string;
     };
 
-export type PostCompactionLoopGuard = {
+type PostCompactionLoopGuard = {
   armPostCompaction: () => void;
   observe: (call: PostCompactionGuardObservation) => PostCompactionGuardVerdict;
   snapshot: () => { armed: boolean; remainingAttempts: number };

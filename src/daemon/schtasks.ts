@@ -1,3 +1,4 @@
+/** Windows Task Scheduler installer, startup fallback, and lifecycle controls. */
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8,7 +9,11 @@ import { isGatewayArgv } from "../infra/gateway-process-argv.js";
 import { findVerifiedGatewayListenerPidsOnPortSync } from "../infra/gateway-processes.js";
 import { inspectPortUsage } from "../infra/ports.js";
 import { parseTcpPort } from "../infra/tcp-port.js";
-import { getWindowsInstallRoots } from "../infra/windows-install-roots.js";
+import {
+  getWindowsCmdExePath,
+  getWindowsPowerShellExePath,
+  getWindowsSystem32ExePath,
+} from "../infra/windows-install-roots.js";
 import { killProcessTree } from "../process/kill-tree.js";
 import { sleep } from "../utils.js";
 import { parseCmdScriptCommandLine, quoteCmdScriptArg } from "./cmd-argv.js";
@@ -43,6 +48,8 @@ function resolveTaskName(env: GatewayServiceEnv): string {
 }
 
 function shouldFallbackToStartupEntry(params: { code: number; detail: string }): boolean {
+  // Permission failures and hung schtasks calls can still be served by the
+  // per-user Startup folder fallback.
   return (
     params.code === 1 ||
     /(?:access is denied|acceso denegado)/i.test(params.detail) ||
@@ -93,6 +100,8 @@ function resolveStartupEntryPath(env: GatewayServiceEnv, extension?: "cmd" | "vb
 function resolveStartupEntryPaths(env: GatewayServiceEnv): string[] {
   const primaryPath = resolveStartupEntryPath(env);
   const legacyCmdPath = resolveStartupEntryPath(env, "cmd");
+  // Hidden VBS launchers supersede cmd launchers, but uninstall must remove the
+  // legacy cmd path from older installs too.
   return uniqueStrings([primaryPath, legacyCmdPath]);
 }
 
@@ -257,6 +266,7 @@ export async function readScheduledTaskCommand(
       if (lower.startsWith("set ")) {
         const assignment = parseCmdSetAssignment(line.slice(4));
         if (assignment) {
+          // Generated cmd launchers inline service env before the final command.
           environment[assignment.key] = assignment.value;
         }
         continue;
@@ -408,7 +418,8 @@ function buildTaskScript({
 }
 
 function renderStartupLaunchCommand(scriptPath: string): string {
-  return `start "" /min cmd.exe /d /c ${quoteCmdScriptArg(scriptPath)}`;
+  const cmdExePath = quoteCmdScriptArg(getWindowsCmdExePath());
+  return `start "" /min ${cmdExePath} /d /c ${quoteCmdScriptArg(scriptPath)}`;
 }
 
 function buildStartupLauncherScript(params: { description?: string; scriptPath: string }): string {
@@ -491,7 +502,7 @@ async function launchFallbackTaskScript(env: GatewayServiceEnv): Promise<void> {
     return;
   }
 
-  const child = spawn("cmd.exe", ["/d", "/c", scriptPath], {
+  const child = spawn(getWindowsCmdExePath(), ["/d", "/c", scriptPath], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -736,7 +747,7 @@ async function terminateGatewayProcessTree(pid: number, graceMs: number): Promis
     killProcessTree(pid, { graceMs });
     return;
   }
-  const taskkillPath = path.join(getWindowsInstallRoots().systemRoot, "System32", "taskkill.exe");
+  const taskkillPath = getWindowsSystem32ExePath("taskkill.exe");
   spawnSync(taskkillPath, ["/T", "/PID", String(pid)], {
     stdio: "ignore",
     timeout: 5_000,
@@ -789,7 +800,7 @@ function readWindowsProcessSnapshot(): WindowsProcessSnapshotEntry[] | null {
   }
 
   const processSnapshot = spawnSync(
-    "powershell",
+    getWindowsPowerShellExePath(),
     [
       "-NoProfile",
       "-Command",

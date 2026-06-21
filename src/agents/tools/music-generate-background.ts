@@ -1,14 +1,14 @@
-import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { AgentGeneratedAttachment } from "../generated-attachments.js";
+/**
+ * Music generation background task facade.
+ *
+ * Binds shared detached media-task lifecycle behavior to music_generate labels and completion messages.
+ */
 import { MUSIC_GENERATION_TASK_KIND } from "../music-generation-task-status.js";
 import {
   createMediaGenerationTaskLifecycle,
   type MediaGenerationTaskHandle,
 } from "./media-generate-background-shared.js";
 
-/**
- * Music-generation task lifecycle adapters over the shared media background runner.
- */
 export type MusicGenerationTaskHandle = MediaGenerationTaskHandle;
 
 /** Shared lifecycle configured with music-specific status text and event metadata. */
@@ -43,17 +43,3 @@ export const completeMusicGenerationTaskRun = (
 export const failMusicGenerationTaskRun = (
   ...params: Parameters<typeof musicGenerationTaskLifecycle.failTaskRun>
 ) => musicGenerationTaskLifecycle.failTaskRun(...params);
-
-/** Wakes the waiting session turn with final music-generation output. */
-export async function wakeMusicGenerationTaskCompletion(params: {
-  config?: OpenClawConfig;
-  handle: MusicGenerationTaskHandle | null;
-  status: "ok" | "error";
-  statusLabel: string;
-  result: string;
-  attachments?: AgentGeneratedAttachment[];
-  mediaUrls?: string[];
-  statsLine?: string;
-}) {
-  return await musicGenerationTaskLifecycle.wakeTaskCompletion(params);
-}
