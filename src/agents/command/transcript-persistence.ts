@@ -82,22 +82,31 @@ const CLI_TRANSCRIPT_UNAVAILABLE_USAGE = {
   contextUsage: { state: "unavailable" },
 } as const;
 
-function resolveCliTranscriptUsage(usage: TranscriptUsage | undefined): TranscriptUsage {
-  if (!usage) {
+/**
+ * Transcript counters account for the whole turn; `contextUsage` stays the latest call's
+ * prompt size so context readers never size the window from a multi-call aggregate.
+ */
+export function resolveCliTranscriptUsage(
+  lastCallUsage: TranscriptUsage | undefined,
+  turnUsage: TranscriptUsage | undefined,
+): TranscriptUsage {
+  if (!lastCallUsage) {
     return CLI_TRANSCRIPT_UNAVAILABLE_USAGE;
   }
-  if (usage.contextUsage) {
-    return usage;
+  const counters = turnUsage ?? lastCallUsage;
+  if (lastCallUsage.contextUsage) {
+    return { ...counters, contextUsage: lastCallUsage.contextUsage };
   }
-  const promptTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+  const promptTokens =
+    (lastCallUsage.input ?? 0) + (lastCallUsage.cacheRead ?? 0) + (lastCallUsage.cacheWrite ?? 0);
   return {
-    ...usage,
+    ...counters,
     contextUsage:
       promptTokens > 0
         ? {
             state: "available",
             promptTokens,
-            totalTokens: promptTokens + (usage.output ?? 0),
+            totalTokens: promptTokens + (lastCallUsage.output ?? 0),
           }
         : { state: "unavailable" },
   };
@@ -311,7 +320,10 @@ export async function persistCliTurnTranscript(
       stopReason: "stop",
       // The marker is terminal for fallback scans: without it, readers could
       // skip this turn and revive an older cumulative usage record as fresh.
-      usage: resolveCliTranscriptUsage(result.meta.agentMeta?.lastCallUsage),
+      usage: resolveCliTranscriptUsage(
+        result.meta.agentMeta?.lastCallUsage,
+        result.meta.agentMeta?.diagnosticUsage,
+      ),
     },
   });
 }
