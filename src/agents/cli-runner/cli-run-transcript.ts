@@ -30,7 +30,7 @@ import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
 import { isHeartbeatLifecycleRunKind } from "../bootstrap-mode.js";
 import type { CliOutput, CliUsage } from "../cli-output-contracts.js";
-import { resolveCliTranscriptUsage } from "../command/transcript-persistence.js";
+import { resolveCliTranscriptUsage, type CliTranscriptUsage } from "../cli-transcript-usage.js";
 import {
   awaitAgentEndSideEffects,
   runAgentEndSideEffects,
@@ -139,7 +139,7 @@ function buildCliAssistantTranscriptUsage(
   lastCallUsage: CliUsage | undefined,
   turnUsage: CliUsage | undefined,
 ): Usage {
-  const usage: ReturnType<typeof resolveCliTranscriptUsage> | undefined = turnUsage
+  const usage: CliTranscriptUsage | undefined = turnUsage
     ? resolveCliTranscriptUsage(lastCallUsage, turnUsage)
     : lastCallUsage;
   const counters = buildUsageWithNoCost({

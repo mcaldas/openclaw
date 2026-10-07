@@ -20,6 +20,7 @@ import {
   classifyAgentRunTerminalOutcome,
   type AgentRunTerminalOutcome,
 } from "../agent-run-terminal-outcome.js";
+import { resolveCliTranscriptUsage } from "../cli-transcript-usage.js";
 import type { EmbeddedAgentRunResult } from "../embedded-agent.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../harness/hook-helpers.js";
 import { projectAgentHarnessTranscriptMessageForDisplay } from "../harness/transcript-visibility.js";
@@ -73,44 +74,6 @@ type PersistTextTurnTranscriptResult =
   | { kind: "session-rebound"; sessionEntry: undefined };
 
 const ACP_TRANSCRIPT_USAGE = buildUsageWithNoCost({});
-const CLI_TRANSCRIPT_UNAVAILABLE_USAGE = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  total: 0,
-  contextUsage: { state: "unavailable" },
-} as const;
-
-/**
- * Transcript counters account for the whole turn; `contextUsage` stays the latest call's
- * prompt size so context readers never size the window from a multi-call aggregate.
- */
-export function resolveCliTranscriptUsage(
-  lastCallUsage: TranscriptUsage | undefined,
-  turnUsage: TranscriptUsage | undefined,
-): TranscriptUsage {
-  if (!lastCallUsage) {
-    return CLI_TRANSCRIPT_UNAVAILABLE_USAGE;
-  }
-  const counters = turnUsage ?? lastCallUsage;
-  if (lastCallUsage.contextUsage) {
-    return { ...counters, contextUsage: lastCallUsage.contextUsage };
-  }
-  const promptTokens =
-    (lastCallUsage.input ?? 0) + (lastCallUsage.cacheRead ?? 0) + (lastCallUsage.cacheWrite ?? 0);
-  return {
-    ...counters,
-    contextUsage:
-      promptTokens > 0
-        ? {
-            state: "available",
-            promptTokens,
-            totalTokens: promptTokens + (lastCallUsage.output ?? 0),
-          }
-        : { state: "unavailable" },
-  };
-}
 function resolveTranscriptUsage(usage: PersistTextTurnTranscriptParams["assistant"]["usage"]) {
   if (!usage) {
     return ACP_TRANSCRIPT_USAGE;
