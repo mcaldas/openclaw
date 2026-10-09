@@ -46,6 +46,7 @@ type TextTurnTranscriptContext = {
   threadId?: string | number;
   sessionCwd: string;
   config: OpenClawConfig;
+  runId?: string;
 };
 
 type PersistTextTurnTranscriptParams = TextTurnTranscriptContext & {
@@ -187,9 +188,10 @@ async function persistTextTurnTranscript(
       config: params.config,
       cwd: params.sessionCwd,
       messages,
+      runId: params.runId,
       publishWhen: "always",
       touchSessionEntry: true,
-      updateMode: "file-only",
+      updateMode: params.runId ? "inline" : "file-only",
       expectedSessionId:
         params.expectedSessionId ??
         (params.sessionStore && params.storePath ? params.sessionId : undefined),
@@ -266,8 +268,6 @@ export async function persistCliTurnTranscript(
 ): Promise<PersistTextTurnTranscriptResult> {
   const { result, skipUserTurn: requestedSkipUserTurn, ...transcript } = params;
   const replyText = resolveCliTranscriptReplyText(result);
-  const provider = result.meta.agentMeta?.provider?.trim() ?? "cli";
-  const model = result.meta.agentMeta?.model?.trim() ?? "default";
   const skipUserTurn = requestedSkipUserTurn === true;
 
   return await persistTextTurnTranscript({
@@ -278,8 +278,8 @@ export async function persistCliTurnTranscript(
     finalText: replyText,
     assistant: {
       api: "cli",
-      provider,
-      model,
+      provider: result.meta.agentMeta?.provider?.trim() ?? "cli",
+      model: result.meta.agentMeta?.model?.trim() ?? "default",
       stopReason: "stop",
       // The marker is terminal for fallback scans: without it, readers could
       // skip this turn and revive an older cumulative usage record as fresh.

@@ -15,7 +15,6 @@ import {
 } from "./client-runtime.js";
 import type { CodexAppServerClient } from "./client.js";
 import {
-  assertCodexInferenceRouteConfig,
   getCodexInferenceThread,
   getCodexInferenceThreadQualification,
 } from "./inference-routing.js";
@@ -49,7 +48,6 @@ import {
   CodexIncognitoPolicyChangeError,
   refreshCodexThreadInstructions,
 } from "./thread-policy.js";
-import { buildThreadResumeParams } from "./thread-requests.js";
 
 type CodexWarmThreadReuseParams = CodexThreadRequestContext & {
   params: CodexStartOrResumeThreadParams;
@@ -204,12 +202,9 @@ export async function tryReuseCodexLiveThread(
     clientId,
     dynamicToolsFingerprint,
     environmentSelectionFingerprint,
-    hostSystemAgentActive,
     lifecycleTiming,
     ringZeroActive,
     restrictedToolSurface,
-    restrictedToolSurfaceInheritedMcpServerNames,
-    startModelProvider,
     startModelSelection,
     throwIfAborted,
   } = options;
@@ -224,13 +219,16 @@ export async function tryReuseCodexLiveThread(
       ((await options.buildLoadedPluginThreadConfig(binding))?.fingerprint ??
         binding.pluginAppsFingerprint) === binding.pluginAppsFingerprint
     ) {
-      await params.buildFinalConfigPatch?.({
-        action: "resume",
-        binding,
-        ...(options.nativeModelInputTools
-          ? { nativeModelInputTools: options.nativeModelInputTools }
-          : {}),
-      });
+      await params.buildFinalConfigPatch?.(
+        {
+          action: "resume",
+          binding,
+          ...(options.nativeModelInputTools
+            ? { nativeModelInputTools: options.nativeModelInputTools }
+            : {}),
+        },
+        params.client,
+      );
       throwIfAborted();
       params.assertCurrent?.();
       return { kind: "ready", binding: { ...binding, lifecycle: { action: "resumed" } } };
@@ -324,27 +322,14 @@ export async function tryReuseCodexLiveThread(
       prebuiltFinalConfigPatch.configPatch,
     );
     const resumeParams = lifecycleTiming.measureSync("warm-thread-resume-params", () =>
-      buildThreadResumeParams(params.params, {
-        ...params,
-        threadId: binding.threadId,
-        authProfileId: resumeAuthProfileId,
-        model: startModelSelection.model,
-        modelProvider: startModelProvider,
-        preserveNativeModel: binding.preserveNativeModel === true,
-        config: resumeConfig,
-        hostSystemAgentActive,
-        restrictedToolSurfaceInheritedMcpServerNames,
-      }),
+      options.buildResumeParams(binding, resumeAuthProfileId, resumeConfig),
     );
-    assertCodexInferenceRouteConfig(
-      params.client,
-      params.inferenceRoute,
+    options.assertInferenceConfig(
       resumeParams.config,
       resumeParams.modelProvider ??
         (binding.preserveNativeModel
           ? nativeThread?.modelProvider?.trim() || binding.modelProvider
           : undefined),
-      params.inferenceProviderRoutes,
     );
     const liveThreadConfigFingerprint = incognito
       ? retainedThread.configFingerprint
