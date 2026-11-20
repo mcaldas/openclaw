@@ -27,6 +27,15 @@ const KEYPAD_ACK_GRACE_MS = 5_000;
 /** Hold gates of live room calls, so the room can wake Jarvis when the owner joins. */
 export const roomHoldGates = new Map<string, HoldGate>();
 
+/**
+ * Per live call: drop the model's audio for a while. Gemini answers every tool result aloud,
+ * and after a key press or a hold it says "No speech." or "No spoken response." to the line
+ * (hold lab call 2026-11-20), which a speech-enabled menu or a person picking up would hear.
+ */
+export const modelQuietWindows = new Map<string, (ms: number) => void>();
+/** Long enough for those replies (0.5-1.5 s, starting within 1 s of the result). */
+export const SILENT_TOOL_QUIET_MS = 3_000;
+
 function wantsHoldGate(call: CallRecord): boolean {
   const room = call.metadata?.room;
   return Boolean(
@@ -237,6 +246,11 @@ export function createRealtimeCallPlayback(params: {
       )
     : undefined;
   const holdGate = room?.gate;
+  let quietUntil = 0;
+  const quiet = (ms: number) => {
+    quietUntil = Date.now() + ms;
+  };
+  modelQuietWindows.set(callId, quiet);
   if (room) {
     console.log(`[voice-call] hold gate detector=${room.detector} ${tag}`);
     roomHoldGates.set(callId, room.gate);
@@ -249,7 +263,8 @@ export function createRealtimeCallPlayback(params: {
       callId,
       harness,
       isOpen: () => !params.isClosed() && ws.readyState === WebSocket.OPEN,
-      isBlocked: () => outboundGreeting.isBlocked() && !hostSpeech.isActive(),
+      isBlocked: () =>
+        Date.now() < quietUntil || (outboundGreeting.isBlocked() && !hostSpeech.isActive()),
       onAudibleOutput: () => {
         outboundGreeting.claim();
       },
@@ -287,6 +302,9 @@ export function createRealtimeCallPlayback(params: {
       roomHoldGates.delete(callId);
     }
     room?.close();
+    if (modelQuietWindows.get(callId) === quiet) {
+      modelQuietWindows.delete(callId);
+    }
     closeActivity();
   };
   return {

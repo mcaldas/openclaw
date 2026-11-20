@@ -14,7 +14,11 @@ import { loadSileroVad } from "./silero-vad.js";
 import { buildSpeakerTranscript, SPEAKER_TRANSCRIPT_PROMPT } from "./speaker-transcript.js";
 import type { CallRecord } from "./types.js";
 import type { VoiceCallWebhookServer } from "./webhook.js";
-import { roomHoldGates } from "./webhook/realtime-call-playback.js";
+import {
+  modelQuietWindows,
+  roomHoldGates,
+  SILENT_TOOL_QUIET_MS,
+} from "./webhook/realtime-call-playback.js";
 import type { RealtimeCallHandler } from "./webhook/realtime-handler.js";
 
 type Logger = { info: (message: string) => void; warn: (message: string) => void };
@@ -64,6 +68,7 @@ export function wireCallRooms(params: {
     const status = args && typeof args === "object" && "status" in args ? args.status : args;
     params.log.info(`[voice-call] phone menu ${String(status)} callId=${callId}`);
     const gate = roomHoldGates.get(callId);
+    modelQuietWindows.get(callId)?.(SILENT_TOOL_QUIET_MS);
     return phoneMenuResult(
       status,
       gate &&
@@ -138,7 +143,11 @@ export function createRecordingTranscriber(params: {
       })),
       // Jarvis's own words come from his text, which is exact.
       assistant: call.transcript
-        .filter((entry) => entry.speaker === "bot" && entry.isFinal)
+        // A bare tag such as "<no spoken response>" is the model narrating a tool result.
+        .filter(
+          (entry) =>
+            entry.speaker === "bot" && entry.isFinal && !/^<[^>]*>\S*$/u.test(entry.text.trim()),
+        )
         .map((entry) => ({ at: entry.timestamp, text: entry.text })),
       assistantLabel: "Assistant",
       transcribe: async (filePath) =>

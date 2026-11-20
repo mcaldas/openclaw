@@ -53,6 +53,7 @@ import {
   providerRequiresPublicWebhook,
 } from "./webhook-exposure.js";
 import { VoiceCallWebhookServer } from "./webhook.js";
+import { modelQuietWindows, SILENT_TOOL_QUIET_MS } from "./webhook/realtime-call-playback.js";
 import { cleanupTailscaleExposure, setupTailscaleExposure } from "./webhook/tailscale.js";
 
 export type VoiceCallRuntime = {
@@ -424,6 +425,9 @@ export async function createVoiceCallRuntime(params: {
         }
         // In-band only: the provider fallback would replace the TwiML and end this stream.
         const result = await manager.sendDtmf(callId, digits, { inBandOnly: true });
+        if (result.success) {
+          modelQuietWindows.get(callId)?.(SILENT_TOOL_QUIET_MS);
+        }
         return result.success
           ? {
               success: true,

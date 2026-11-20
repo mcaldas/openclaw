@@ -1,7 +1,11 @@
 import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeDtmfMulaw } from "../dtmf-tones.js";
-import { createRealtimeCallPlayback } from "./realtime-call-playback.js";
+import {
+  createRealtimeCallPlayback,
+  modelQuietWindows,
+  SILENT_TOOL_QUIET_MS,
+} from "./realtime-call-playback.js";
 
 type PlaybackParams = Parameters<typeof createRealtimeCallPlayback>[0];
 
@@ -47,6 +51,21 @@ function mediaAudio(messages: string[]): Buffer {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("model quiet window", () => {
+  it("drops the model's reply to a silent tool for a few seconds, then plays it again", async () => {
+    const { playback, sent } = createPlayback();
+    const { audioSink } = playback.audioController;
+    modelQuietWindows.get("call-1")?.(SILENT_TOOL_QUIET_MS);
+    audioSink.sendAudio(Buffer.alloc(160, 0x55), { itemId: "no-speech" });
+    await vi.advanceTimersByTimeAsync(SILENT_TOOL_QUIET_MS);
+    audioSink.sendAudio(Buffer.alloc(160, 0x66), { itemId: "reply" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mediaAudio(sent)).toEqual(Buffer.alloc(160, 0x66));
+    playback.activity.close();
+    expect(modelQuietWindows.has("call-1")).toBe(false);
+  });
+});
 
 describe("realtime call keypad tones", () => {
   it("keeps the tones whole through barge-in while dropping model speech around them", async () => {
