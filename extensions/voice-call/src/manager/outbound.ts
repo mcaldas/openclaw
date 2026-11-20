@@ -343,6 +343,16 @@ export async function sendDtmf(
   callId: CallId,
   digits: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // A live realtime stream takes in-band tones: replacing its TwiML would end the stream.
+  if (lookupConnectedCall(ctx, callId).kind === "ok") {
+    try {
+      if (await ctx.playRealtimeKeypadTones?.(callId, digits)) {
+        return { success: true };
+      }
+    } catch (err) {
+      return { success: false, error: formatErrorMessage(err) };
+    }
+  }
   const validationError = validateDtmfDigits(digits);
   if (validationError) {
     return { success: false, error: validationError };

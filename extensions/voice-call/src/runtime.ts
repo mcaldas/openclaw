@@ -27,7 +27,10 @@ import { CallManager } from "./manager.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import { buildRealtimeVoiceInstructions } from "./realtime-agent-context.js";
-import { resolveVoiceCallRealtimeTools } from "./realtime-call-control.js";
+import {
+  REALTIME_VOICE_SEND_DTMF_TOOL_NAME,
+  resolveVoiceCallRealtimeTools,
+} from "./realtime-call-control.js";
 import { resolveCallAgentId, resolveVoiceCallAgentId } from "./resolve-call-agent-id.js";
 import { resolveVoiceResponseModel } from "./response-model.js";
 import { setVoiceCallStateRuntime, type VoiceCallStateRuntime } from "./runtime-state.js";
@@ -387,6 +390,23 @@ export async function createVoiceCallRuntime(params: {
         },
       );
     }
+    realtimeHandler.registerToolHandler(
+      REALTIME_VOICE_SEND_DTMF_TOOL_NAME,
+      async (args, callId) => {
+        const digits =
+          args && typeof args === "object" && "digits" in args ? args.digits : undefined;
+        if (typeof digits !== "string" || !digits) {
+          return { error: "digits is required" };
+        }
+        const played = await realtimeHandler.playKeypadTones(callId, digits);
+        if (!played) {
+          return { error: "This call has no live audio stream for keypad tones" };
+        }
+        return { success: true, digits, playoutConfirmed: played.confirmed };
+      },
+    );
+    manager.playRealtimeKeypadTones = (callId, digits) =>
+      realtimeHandler.playKeypadTones(callId, digits);
     manager.playRealtimeVoicemail = (callId, instructions) =>
       realtimeHandler.playVoicemail(callId, instructions);
     manager.beforeCarrierPlayback = (callId) => realtimeHandler.prepareCarrierPlayback(callId);

@@ -2,10 +2,15 @@ import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   buildRealtimeVoiceSpeakExactMessage,
   calculateMulawRms,
+  readRealtimeVoiceConsultQuestion,
   type RealtimeVoiceAudioSink,
   type RealtimeVoiceBridgeSession,
   type RealtimeVoiceSessionHarness,
 } from "openclaw/plugin-sdk/realtime-voice";
+import {
+  asOptionalRecord,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { CallBriefSchema } from "../call-brief.js";
 import { DEFAULT_VOICEMAIL_HOLD_OPENING_MAX_MS } from "../errand-config.js";
 import type { CallRecord } from "../types.js";
@@ -45,6 +50,33 @@ export function buildForcedConsultSpeechPrompt(result: string): string {
     "Speak the following answer to the caller now, briefly and naturally:",
     result,
   ].join("\n");
+}
+
+/** Prefer the caller's own words when the provider sent a much shorter consult question. */
+export function withFallbackConsultQuestion(args: unknown, fallback: string | undefined): unknown {
+  const providerQuestion = readRealtimeVoiceConsultQuestion(args);
+  const question = fallback?.trim();
+  if (providerQuestion) {
+    if (
+      question &&
+      providerQuestion.length <= 40 &&
+      question.length >= providerQuestion.length + 8
+    ) {
+      const record = asOptionalRecord(args);
+      const context = normalizeOptionalString(record?.context);
+      const fallbackContext = `Realtime provider supplied a shorter consult question: ${providerQuestion}`;
+      return {
+        ...record,
+        question,
+        context: context ? `${context}\n\n${fallbackContext}` : fallbackContext,
+      };
+    }
+    return args;
+  }
+  if (!question) {
+    return args;
+  }
+  return { ...asOptionalRecord(args), question };
 }
 
 export function buildGreetingInstructions(

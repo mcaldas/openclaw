@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   calculateMulawRms,
@@ -5,6 +6,7 @@ import {
   type RealtimeVoiceSessionHarness,
 } from "openclaw/plugin-sdk/realtime-voice";
 import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
+import { encodeDtmfMulaw } from "../dtmf-tones.js";
 import type { CallRecord } from "../types.js";
 import { RealtimeAudioPacer } from "./realtime-audio-pacer.js";
 import {
@@ -17,6 +19,8 @@ import {
 import type { StreamFrameAdapter } from "./stream-frame-adapter.js";
 
 const MAX_REALTIME_WS_BUFFERED_BYTES = 1024 * 1024;
+// Time for the carrier to acknowledge the mark after the last tone has played.
+const KEYPAD_ACK_GRACE_MS = 5_000;
 
 export function createRealtimeCallPlayback(params: {
   ws: WebSocket;
@@ -53,10 +57,17 @@ export function createRealtimeCallPlayback(params: {
     return checkBackpressure("after");
   };
   const pendingMarkAcks = new Map<string, () => void>();
+  const keypadAborts = new Set<(error: Error) => void>();
   const audioPacer = new RealtimeAudioPacer({
     // Every pacer reset discards queued marks, so their stored provider
     // acknowledgements can never fire and must be retired with them.
-    onPlaybackReset: () => pendingMarkAcks.clear(),
+    onPlaybackReset: () => {
+      pendingMarkAcks.clear();
+      // Clears are held during tones, so a reset here means the stream closed under them.
+      for (const abort of keypadAborts) {
+        abort(new Error("Realtime call stream closed before the keypad tones finished"));
+      }
+    },
     // Model audio can arrive long before the callee hears it; host speech and the
     // speech-idle timer follow what is actually played out on the call.
     onAudioSent: (audio) => {
@@ -64,6 +75,15 @@ export function createRealtimeCallPlayback(params: {
         hostSpeech.noteAudibleOutput();
         activity.noteSpeech();
       }
+    },
+    // A barge-in clear mid-tone would cut a key press short or drop it, so it spares the tones.
+    canClear: () => {
+      if (keypadAborts.size > 0) {
+        console.log(
+          `[voice-call] realtime audio clear kept keypad tones callId=${callId} providerCallId=${callSid}`,
+        );
+      }
+      return keypadAborts.size === 0;
     },
     send: sendString,
     serializer: adapter,
@@ -149,18 +169,57 @@ export function createRealtimeCallPlayback(params: {
       },
     };
   })();
-  const audioController = createRealtimeCallAudioController({
-    audioPacer,
-    callId,
-    harness,
-    isOpen: () => !params.isClosed() && ws.readyState === WebSocket.OPEN,
-    isBlocked: () => outboundGreeting.isBlocked() && !hostSpeech.isActive(),
-    onAudibleOutput: () => {
-      outboundGreeting.claim();
-    },
-    pendingMarkAcks,
-    providerCallId: callSid,
-  });
+  // Tones join the paced queue behind speech already queued, and model speech that arrives
+  // later waits behind them; the carrier mark after the last tone confirms the keys played.
+  const playKeypadTones = (digits: string): Promise<{ durationMs: number; confirmed: boolean }> => {
+    if (params.isClosed() || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("Realtime call stream is closed"));
+    }
+    const audio = encodeDtmfMulaw(digits);
+    const durationMs = audio.length / 8;
+    const markName = `openclaw-keypad-${randomUUID()}`;
+    return new Promise((resolve, reject) => {
+      const finish = (confirmed: boolean, error?: Error) => {
+        if (!keypadAborts.delete(abort)) {
+          return;
+        }
+        clearTimeout(timer);
+        pendingMarkAcks.delete(markName);
+        if (error) {
+          reject(error);
+        } else {
+          resolve({ durationMs, confirmed });
+        }
+      };
+      const abort = (error: Error) => finish(false, error);
+      const playoutMs = audioPacer.queuedAudioMs() + durationMs;
+      const timer = setTimeout(() => finish(false), playoutMs + KEYPAD_ACK_GRACE_MS);
+      timer.unref?.();
+      // Registered before queueing: a backpressure close can reset the pacer synchronously.
+      keypadAborts.add(abort);
+      pendingMarkAcks.set(markName, () => finish(true));
+      console.log(
+        `[voice-call] realtime keypad tones queued callId=${callId} providerCallId=${callSid} keys=${digits.length} durationMs=${durationMs} playoutMs=${playoutMs}`,
+      );
+      audioPacer.sendAudio(audio, { keep: true });
+      audioPacer.sendMark(markName);
+    });
+  };
+  const audioController = {
+    playKeypadTones,
+    ...createRealtimeCallAudioController({
+      audioPacer,
+      callId,
+      harness,
+      isOpen: () => !params.isClosed() && ws.readyState === WebSocket.OPEN,
+      isBlocked: () => outboundGreeting.isBlocked() && !hostSpeech.isActive(),
+      onAudibleOutput: () => {
+        outboundGreeting.claim();
+      },
+      pendingMarkAcks,
+      providerCallId: callSid,
+    }),
+  };
   const activity = createRealtimeCallActivityController({
     idleHangupMs: params.idleHangupMs,
     isPaused: () => outboundGreeting.isBlocked() || hostSpeech.isActive(),

@@ -38,6 +38,11 @@ export type CallManagerContext = {
   onCallUpdated?: (call: CallRecord) => void | Promise<void>;
   beforeCallEnd?: (call: CallRecord) => Promise<void>;
   playRealtimeVoicemail?: (callId: CallId, instructions: string) => Promise<void> | undefined;
+  /** Keypad tones on a live realtime stream; undefined when no stream owns the call. */
+  playRealtimeKeypadTones?: (
+    callId: CallId,
+    digits: string,
+  ) => Promise<{ durationMs: number; confirmed: boolean }> | undefined;
   beforeCarrierPlayback?: (callId: CallId) => Promise<void>;
   onCallAnswered?: (call: CallRecord) => void;
   onCallerSpeech?: (call: CallRecord) => void;
