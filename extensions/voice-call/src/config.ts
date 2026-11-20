@@ -76,6 +76,8 @@ const VoiceCallRoomConfigSchema = z
     ownerRingSeconds: z.number().int().min(5).max(60).default(25),
     /** Keep hold music away from the realtime model (default true). */
     muteHoldMusic: z.boolean().default(true),
+    /** Hold detection: Silero VAD with the model idle on hold, or the original energy gate. */
+    holdDetector: z.enum(["silero", "energy"]).default("silero"),
   })
   .strict();
 

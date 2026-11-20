@@ -18,6 +18,8 @@ export type RoomState = {
   name: string;
   /** False turns the hold-music gate off for this call. */
   muteHold?: boolean;
+  /** "energy" keeps the original hold gate for this call (default Silero). */
+  holdDetector?: "silero" | "energy";
   /** Jarvis's leg: a TwiML App participant whose Voice URL opens the realtime stream. */
   agentCallSid?: string;
   agentGone?: boolean;

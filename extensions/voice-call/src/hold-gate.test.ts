@@ -117,3 +117,122 @@ describe("createHoldGate", () => {
     expect(events).toEqual(["hold", "release"]);
   });
 });
+
+describe("createHoldGate with Silero probabilities", () => {
+  /** Silero stand-in: speech probability 0.9 while `speaking` is true, else 0. */
+  function sileroGate(options: Parameters<typeof createHoldGate>[1] = {}) {
+    const events: HoldGateEvent[] = [];
+    const state = { speaking: false, probs: [] as number[], frames: 0 };
+    const speechProbs = {
+      push() {
+        state.frames += 1;
+        while (state.probs.length < Math.floor((state.frames * 160) / 256)) {
+          state.probs.push(state.speaking ? 0.9 : 0);
+        }
+      },
+      recent: (count: number) => state.probs.slice(-count),
+    };
+    const gate = createHoldGate((event) => events.push(event), {
+      speechProbs,
+      holdFeed: "none",
+      ...options,
+    });
+    const say = (ms: number, audio = speech(ms)) => {
+      state.speaking = true;
+      const out = feed(gate, audio);
+      state.speaking = false;
+      return out;
+    };
+    /** Frame by frame with a macrotask between, as a live stream lets a check answer arrive. */
+    const sayLive = async (ms: number) => {
+      const audio = speech(ms);
+      const out: Buffer[] = [];
+      state.speaking = true;
+      for (let offset = 0; offset < audio.length; offset += 160) {
+        out.push(gate.accept(audio.subarray(offset, offset + 160)));
+        await new Promise((resolve) => {
+          setImmediate(resolve);
+        });
+      }
+      state.speaking = false;
+      return out;
+    };
+    return { events, gate, say, sayLive };
+  }
+
+  it("holds on music that the energy rule calls speech, then sends the model nothing", () => {
+    const { events, gate } = sileroGate();
+    // Bursty audio that Silero scores as non-speech (sung or drum-heavy hold music).
+    const audio = speech(13_020);
+    feed(gate, audio.subarray(0, 550 * 160)); // the hold starts on the 550th frame (11 s)
+    expect(events).toEqual(["hold"]);
+    // The first second of the hold is silence, so the model's turn detection settles.
+    const tail = feed(gate, audio.subarray(550 * 160, 600 * 160));
+    expect(tail.every((frame) => frame.length === 160 && isSilence(frame))).toBe(true);
+    const after = feed(gate, audio.subarray(600 * 160));
+    expect(after.every((frame) => frame.length === 0)).toBe(true);
+  });
+
+  it("wakes within a second of speech and replays the held-back audio", () => {
+    const { events, gate, say } = sileroGate();
+    feed(gate, music(12_000));
+    const woke = say(1_000);
+    expect(events).toEqual(["hold", "speech"]);
+    expect(gate.mode).toBe("probe");
+    expect(woke.find((frame) => frame.length > 160)?.length).toBe(3 * RATE);
+  });
+
+  it("keeps a repeated announcement on hold and ignores the rest of it", async () => {
+    const checks: Buffer[] = [];
+    const { events, gate, sayLive } = sileroGate({
+      checkWake: async (audio) => {
+        checks.push(audio);
+        return "repeat";
+      },
+    });
+    feed(gate, music(12_000));
+    const during = await sayLive(6_000);
+    expect(checks).toHaveLength(1);
+    expect(events).toEqual(["hold", "repeat"]);
+    expect(gate.mode).toBe("hold");
+    expect(during.slice(-50).every((frame) => frame.length === 0)).toBe(true);
+    // After a pause, new speech is checked again.
+    feed(gate, music(2_000));
+    await sayLive(1_000);
+    expect(checks).toHaveLength(2);
+  });
+
+  it("wakes with everything heard while the check ran, or when it takes too long", async () => {
+    let answer: ((verdict: "wake" | "repeat") => void) | undefined;
+    const { events, gate, say } = sileroGate({
+      checkWake: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    feed(gate, music(12_000));
+    say(1_000);
+    expect(events).toEqual(["hold"]);
+    answer?.("wake");
+    await Promise.resolve();
+    const woke = say(100);
+    expect(events).toEqual(["hold", "speech"]);
+    expect(woke.find((frame) => frame.length > 160)?.length).toBeGreaterThan(3 * RATE);
+
+    const slow = sileroGate({ checkWake: () => new Promise(() => {}) });
+    feed(slow.gate, music(12_000));
+    slow.say(4_000);
+    expect(slow.events).toEqual(["hold", "speech"]);
+  });
+
+  it("holds at once when the model says so, and its reply does not end the hold", () => {
+    const { events, gate } = sileroGate();
+    feed(gate, speech(2_000));
+    gate.holdNow(1_000);
+    gate.noteAssistantSpeech();
+    expect(gate.mode).toBe("hold");
+    feed(gate, music(1_500));
+    gate.noteAssistantSpeech();
+    expect(events).toEqual(["hold", "release"]);
+  });
+});

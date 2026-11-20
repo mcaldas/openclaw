@@ -167,6 +167,7 @@ export async function initiateCall(
             room: {
               name: room,
               ...(ctx.config.room?.muteHoldMusic === false && { muteHold: false }),
+              ...(ctx.config.room?.holdDetector === "energy" && { holdDetector: "energy" }),
             },
           }
         : {}),

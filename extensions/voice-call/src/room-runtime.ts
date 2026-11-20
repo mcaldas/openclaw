@@ -4,10 +4,13 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "../api.js";
 import { recordingWanted, type CallRecordingOutcome } from "./call-recordings.js";
 import type { VoiceCallConfig } from "./config.js";
+import { holdWakeServices, WAKE_TRANSCRIPT_PROMPT } from "./hold-wake.js";
 import type { CallManager } from "./manager.js";
+import { phoneMenuResult, REALTIME_VOICE_PHONE_MENU_TOOL_NAME } from "./phone-menu.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import { REALTIME_VOICE_ADD_OWNER_TOOL_NAME } from "./realtime-call-control.js";
 import { createCallRooms, roomOf, type CallRooms } from "./room.js";
+import { loadSileroVad } from "./silero-vad.js";
 import { buildSpeakerTranscript, SPEAKER_TRANSCRIPT_PROMPT } from "./speaker-transcript.js";
 import type { CallRecord } from "./types.js";
 import type { VoiceCallWebhookServer } from "./webhook.js";
@@ -25,6 +28,8 @@ export function wireCallRooms(params: {
   webhookServer: VoiceCallWebhookServer;
   webhookUrl: () => string | null;
   log: Logger;
+  /** The configured audio model, for checking hold wakes against known announcements. */
+  transcribeWav?: (wavPath: string) => Promise<string | undefined>;
 }): CallRooms | undefined {
   const { config, manager, realtimeHandler } = params;
   if (!config.room?.enabled) {
@@ -55,6 +60,28 @@ export function wireCallRooms(params: {
   realtimeHandler.registerToolHandler(REALTIME_VOICE_ADD_OWNER_TOOL_NAME, (_args, callId) =>
     rooms.addOwner(callId),
   );
+  realtimeHandler.registerToolHandler(REALTIME_VOICE_PHONE_MENU_TOOL_NAME, async (args, callId) => {
+    const status = args && typeof args === "object" && "status" in args ? args.status : args;
+    params.log.info(`[voice-call] phone menu ${String(status)} callId=${callId}`);
+    const gate = roomHoldGates.get(callId);
+    return phoneMenuResult(
+      status,
+      gate &&
+        (() => {
+          gate.holdNow();
+          return gate.mode === "hold";
+        }),
+    );
+  });
+  if (config.room.holdDetector !== "energy") {
+    holdWakeServices.transcribe = params.transcribeWav;
+    void loadSileroVad((message) => params.log.warn(message)).then((vad) => {
+      holdWakeServices.vad = vad;
+      if (vad) {
+        params.log.info("[voice-call] Silero VAD ready for hold detection");
+      }
+    });
+  }
   params.webhookServer.roomRouter = (ctx, req) => {
     const form = new URLSearchParams(ctx.rawBody);
     return rooms.routeWebhook(ctx.query, form, (target) =>
@@ -62,6 +89,25 @@ export function wireCallRooms(params: {
     );
   };
   return rooms;
+}
+
+/** One audio file through the configured audio model, for the hold gate's wake check. */
+export function createWakeTranscriber(params: {
+  coreConfig: OpenClawConfig;
+  mediaUnderstanding: Pick<
+    OpenClawPluginApi["runtime"]["mediaUnderstanding"],
+    "transcribeAudioFile"
+  >;
+}) {
+  return async (filePath: string) =>
+    (
+      await params.mediaUnderstanding.transcribeAudioFile({
+        filePath,
+        cfg: params.coreConfig,
+        mime: "audio/wav",
+        prompt: WAKE_TRANSCRIPT_PROMPT,
+      })
+    ).text;
 }
 
 /** Per-speaker transcripts from call recordings, with the configured audio model. */

@@ -1229,7 +1229,7 @@ export class RealtimeCallHandler {
     const sendAudioToSession = session.sendAudio.bind(session);
     session.sendAudio = (rawAudio) => {
       const audio = audioController.filterInput(rawAudio);
-      if (sessionClosed) {
+      if (sessionClosed || audio.length === 0) {
         return;
       }
       outboundGreeting.noteInputAudio(audio);

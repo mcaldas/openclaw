@@ -26,6 +26,7 @@ import {
   resolveTwilioAuthToken,
 } from "./config.js";
 import { CallManager } from "./manager.js";
+import { PHONE_MENU_INSTRUCTIONS, PHONE_MENU_TOOL } from "./phone-menu.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import { buildRealtimeVoiceInstructions } from "./realtime-agent-context.js";
@@ -36,8 +37,12 @@ import {
 } from "./realtime-call-control.js";
 import { resolveCallAgentId, resolveVoiceCallAgentId } from "./resolve-call-agent-id.js";
 import { resolveVoiceResponseModel } from "./response-model.js";
-import { createRecordingTranscriber, wireCallRooms } from "./room-runtime.js";
-import type { CallRooms } from "./room.js";
+import {
+  createRecordingTranscriber,
+  createWakeTranscriber,
+  wireCallRooms,
+} from "./room-runtime.js";
+import { roomOf, type CallRooms } from "./room.js";
 import { setVoiceCallStateRuntime, type VoiceCallStateRuntime } from "./runtime-state.js";
 import type { TelephonyTtsRuntime } from "./telephony-tts.js";
 import { createTelephonyTtsProvider } from "./telephony-tts.js";
@@ -266,7 +271,9 @@ export async function createVoiceCallRuntime(params: {
       tools: resolveVoiceCallRealtimeTools(
         config.realtime.toolPolicy,
         config.realtime.tools,
-        config.room?.enabled ? [buildAddOwnerTool(config.room.ownerName ?? "the owner")] : [],
+        config.room?.enabled
+          ? [buildAddOwnerTool(config.room.ownerName ?? "the owner"), PHONE_MENU_TOOL]
+          : [],
       ),
     };
     const resolveCallRegistration = async (call: CallRecord) => {
@@ -286,7 +293,9 @@ export async function createVoiceCallRuntime(params: {
         provider: resolved.provider,
         providerConfig: resolved.providerConfig,
         capabilities: resolved.capabilities,
-        instructions: resolveRealtimeInstructions(call),
+        instructions: roomOf(call)
+          ? `${resolveRealtimeInstructions(call)}\n\n${PHONE_MENU_INSTRUCTIONS}`
+          : resolveRealtimeInstructions(call),
       };
     };
     const realtimeHandler = new RealtimeCallHandler(
@@ -441,6 +450,12 @@ export async function createVoiceCallRuntime(params: {
       webhookServer,
       webhookUrl: () => publicWebhookUrl,
       log,
+      transcribeWav: params.deliveryRuntime?.mediaUnderstanding
+        ? createWakeTranscriber({
+            coreConfig: cfg,
+            mediaUnderstanding: params.deliveryRuntime.mediaUnderstanding,
+          })
+        : undefined,
     });
   }
   const recordingApi = config.recording.enabled ? provider.recordings : undefined;

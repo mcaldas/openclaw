@@ -524,7 +524,8 @@
           "ownerCallerId": { "type": "string", "pattern": "^\\+[1-9]\\d{1,14}$" },
           "ownerName": { "type": "string", "minLength": 1 },
           "ownerRingSeconds": { "type": "integer", "minimum": 5, "maximum": 60, "default": 25 },
-          "muteHoldMusic": { "type": "boolean", "default": true }
+          "muteHoldMusic": { "type": "boolean", "default": true },
+          "holdDetector": { "type": "string", "enum": ["silero", "energy"], "default": "silero" }
         }
       },
       "callbacks": {

@@ -7,7 +7,8 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
 import { encodeDtmfMulaw } from "../dtmf-tones.js";
-import { createHoldGate, type HoldGate } from "../hold-gate.js";
+import type { HoldGate } from "../hold-gate.js";
+import { createRoomHoldGate } from "../hold-wake.js";
 import type { CallRecord } from "../types.js";
 import { RealtimeAudioPacer } from "./realtime-audio-pacer.js";
 import {
@@ -219,19 +220,26 @@ export function createRealtimeCallPlayback(params: {
   };
   // Room calls only: hold music never reaches the model, so it cannot re-bill the call on each turn.
   let holdPaused = false;
-  const holdGate = wantsHoldGate(callRecord)
-    ? createHoldGate((event) => {
-        console.log(`[voice-call] hold gate ${event} callId=${callId} providerCallId=${callSid}`);
-        // The idle timer counts speech, and a hold has none: pause it while holding.
-        const holding = event === "hold" || event === "rehold";
-        if (holding !== holdPaused) {
-          holdPaused = holding;
-          (holding ? activity.beginConsult : activity.endConsult)();
-        }
-      })
+  const tag = `callId=${callId} providerCallId=${callSid}`;
+  const room = wantsHoldGate(callRecord)
+    ? createRoomHoldGate(
+        callRecord,
+        (event) => {
+          console.log(`[voice-call] hold gate ${event} ${tag}`);
+          // The idle timer counts speech, and a hold has none: pause it while holding.
+          const holding = event === "hold" || event === "rehold" || event === "repeat";
+          if (holding !== holdPaused) {
+            holdPaused = holding;
+            (holding ? activity.beginConsult : activity.endConsult)();
+          }
+        },
+        (message) => console.log(`[voice-call] ${message} ${tag}`),
+      )
     : undefined;
-  if (holdGate) {
-    roomHoldGates.set(callId, holdGate);
+  const holdGate = room?.gate;
+  if (room) {
+    console.log(`[voice-call] hold gate detector=${room.detector} ${tag}`);
+    roomHoldGates.set(callId, room.gate);
   }
   const audioController = {
     playKeypadTones,
@@ -278,6 +286,7 @@ export function createRealtimeCallPlayback(params: {
     if (roomHoldGates.get(callId) === holdGate) {
       roomHoldGates.delete(callId);
     }
+    room?.close();
     closeActivity();
   };
   return {
