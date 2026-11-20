@@ -3,6 +3,7 @@ import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { VoiceCallConfig } from "./config.js";
 import type { CallRoomApi } from "./providers/base.js";
 import { isProviderStatusTerminal } from "./providers/shared/call-status.js";
+import { REALTIME_VOICE_WHO_SPOKE_TOOL_NAME } from "./realtime-call-control.js";
 import {
   TerminalStates,
   type CallId,
@@ -108,8 +109,6 @@ export function createCallRooms(deps: {
   note: (callId: CallId, instructions: string) => void;
   /** Off while the owner is on the line: Jarvis must hear everything then, music or not. */
   allowHold: (callId: CallId, allowed: boolean) => void;
-  /** Context for Jarvis that he does not answer (who is speaking); false when it cannot go. */
-  context?: (callId: CallId, text: string) => boolean;
   recordOwner: (call: CallRecord) => boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -159,16 +158,14 @@ export function createCallRooms(deps: {
   };
 
   const notes = {
-    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you. While both are on the line, a bracketed line tells you whenever the speaker changes; trust it over the voice, they may sound alike.`,
-    ownerSpeaking: `[${ownerName} is speaking now, from ${ownerName}'s own phone.]`,
-    calleeSpeaking: "[The person you called is speaking now, from the line you called.]",
+    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you. Their voices may sound alike: before you answer either of them, call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} to learn who just spoke, and trust it over the voice.`,
     noAnswer: `${ownerName} did not answer. Tell the other person briefly, then carry on with the task yourself, or ask for a direct number or a good time for ${ownerName} to call back.`,
     left: `${ownerName} has left the call. Carry on with the task yourself; if it is done, say goodbye and end the call.`,
   };
 
-  /** Last person Jarvis was told is speaking, per call: notes go out on a change only. */
-  const lastSpeaker = new Map<CallId, "owner" | "callee">();
-  /** Twilio speaker events, by leg: with both people in the room, say who talks on a change. */
+  /** Recent changes of speaker per call, newest last, while the owner is in the room. */
+  const speakers = new Map<CallId, { who: "owner" | "callee"; at: number }[]>();
+  /** Twilio speaker events, by leg (a voice tells nothing when one person plays both roles). */
   const noteSpeaker = (callId: CallId, form: URLSearchParams) => {
     if (form.get("StatusCallbackEvent") !== "participant-speech-start") {
       return;
@@ -176,7 +173,7 @@ export function createCallRooms(deps: {
     const call = deps.manager.getCall(callId);
     const room = roomOf(call);
     if (!call || !room || room.owner !== "in-room") {
-      lastSpeaker.delete(callId);
+      speakers.delete(callId);
       return;
     }
     const sid = form.get("CallSid");
@@ -187,15 +184,38 @@ export function createCallRooms(deps: {
         : sid === call.providerCallId
           ? "callee"
           : undefined; // Jarvis's own leg, or one that already left
-    if (!who || lastSpeaker.get(callId) === who) {
+    if (!who) {
       return;
     }
-    lastSpeaker.set(callId, who);
-    const sent = deps.context?.(
-      callId,
-      who === "owner" ? notes.ownerSpeaking : notes.calleeSpeaking,
-    );
-    log(`room ${room.name}: ${who} speaking${sent ? "" : " (note not delivered)"}`);
+    const recent = speakers.get(callId) ?? [];
+    if (recent.at(-1)?.who === who) {
+      return;
+    }
+    speakers.set(callId, [...recent.slice(-2), { who, at: now() }]);
+    log(`room ${room.name}: ${who} speaking`);
+  };
+  /** What openclaw_who_spoke tells Jarvis: who spoke last, by phone leg, and who before. */
+  const whoSpoke = (callId: CallId) => {
+    const room = roomOf(deps.manager.getCall(callId));
+    if (!room) {
+      return { error: "This call has no room." };
+    }
+    if (room.owner !== "in-room") {
+      return { lastSpeaker: "the person you called", note: `${ownerName} is not on the call.` };
+    }
+    const name = (who: "owner" | "callee") =>
+      who === "owner" ? `${ownerName}, on ${ownerName}'s own phone` : "the person you called";
+    const recent = speakers.get(callId) ?? [];
+    const last = recent.at(-1);
+    const previous = recent.at(-2);
+    if (!last) {
+      return { lastSpeaker: "unknown: nobody has spoken since they both joined" };
+    }
+    return {
+      lastSpeaker: name(last.who),
+      secondsAgo: Math.round((now() - last.at) / 1_000),
+      ...(previous ? { before: name(previous.who) } : {}),
+    };
   };
 
   const ownerJoined = async (call: CallRecord, callSid: string) => {
@@ -361,6 +381,8 @@ export function createCallRooms(deps: {
   return {
     hooks,
 
+    whoSpoke,
+
     async addOwner(callId: CallId): Promise<Record<string, unknown>> {
       const call = deps.manager.getCall(callId);
       const room = roomOf(call);
@@ -464,7 +486,7 @@ export function createCallRooms(deps: {
       closed.add(call.callId);
       setTimeout(() => closed.delete(call.callId), CLOSED_RETENTION_MS).unref?.();
       keys.delete(call.callId);
-      lastSpeaker.delete(call.callId);
+      speakers.delete(call.callId);
       for (const sid of [room.agentGone ? undefined : room.agentCallSid, room.ownerCallSid]) {
         if (sid) {
           void deps.carrier.hangupLeg(sid).catch((err: unknown) => {

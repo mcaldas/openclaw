@@ -8,14 +8,16 @@ import { holdWakeServices, WAKE_TRANSCRIPT_PROMPT } from "./hold-wake.js";
 import type { CallManager } from "./manager.js";
 import { phoneMenuResult, REALTIME_VOICE_PHONE_MENU_TOOL_NAME } from "./phone-menu.js";
 import type { VoiceCallProvider } from "./providers/base.js";
-import { REALTIME_VOICE_ADD_OWNER_TOOL_NAME } from "./realtime-call-control.js";
+import {
+  REALTIME_VOICE_ADD_OWNER_TOOL_NAME,
+  REALTIME_VOICE_WHO_SPOKE_TOOL_NAME,
+} from "./realtime-call-control.js";
 import { createCallRooms, roomOf, type CallRooms } from "./room.js";
 import { loadSileroVad } from "./silero-vad.js";
 import { buildSpeakerTranscript, SPEAKER_TRANSCRIPT_PROMPT } from "./speaker-transcript.js";
 import type { CallRecord } from "./types.js";
 import type { VoiceCallWebhookServer } from "./webhook.js";
 import {
-  modelContextNotes,
   modelQuietWindows,
   roomHoldGates,
   SILENT_TOOL_QUIET_MS,
@@ -58,13 +60,15 @@ export function wireCallRooms(params: {
       }
     },
     allowHold: (callId, allowed) => roomHoldGates.get(callId)?.setEnabled(allowed),
-    context: (callId, text) => modelContextNotes.get(callId)?.(text) ?? false,
     recordOwner: (call) => config.recording.enabled && recordingWanted(call),
     log: (message) => params.log.info(`[voice-call] ${message}`),
   });
   manager.room = rooms.hooks;
   realtimeHandler.registerToolHandler(REALTIME_VOICE_ADD_OWNER_TOOL_NAME, (_args, callId) =>
     rooms.addOwner(callId),
+  );
+  realtimeHandler.registerToolHandler(REALTIME_VOICE_WHO_SPOKE_TOOL_NAME, async (_args, callId) =>
+    rooms.whoSpoke(callId),
   );
   realtimeHandler.registerToolHandler(REALTIME_VOICE_PHONE_MENU_TOOL_NAME, async (args, callId) => {
     const status = args && typeof args === "object" && "status" in args ? args.status : args;

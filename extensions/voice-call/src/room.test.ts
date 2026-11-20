@@ -40,7 +40,6 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
   };
   const note = vi.fn();
   const allowHold = vi.fn();
-  const context = vi.fn(() => true);
   const rooms = createCallRooms({
     config: {
       fromNumber: "+972500000002",
@@ -54,7 +53,6 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     webhookUrl: () => "https://gw.example/voice/webhook",
     note,
     allowHold,
-    context,
     recordOwner: () => true,
     now: () => clock,
     log: () => {},
@@ -81,7 +79,6 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     carrier,
     note,
     allowHold,
-    context,
     speech,
     status,
     tick: (ms: number) => (clock += ms),
@@ -194,26 +191,30 @@ describe("createCallRooms", () => {
     expect(roomOf(call)?.owner).toBe("no-answer");
   });
 
-  it("tells Jarvis who is speaking, by leg, only on a change and only with both in the room", async () => {
+  it("tells Jarvis who spoke last, by phone leg, once both people are in the room", async () => {
     const call = makeCall({ agentCallSid: "CA-agent" });
-    const { rooms, context, speech, status } = setup(call);
+    const { rooms, speech, status, tick } = setup(call);
     await speech("CA-callee");
-    expect(context).not.toHaveBeenCalled(); // only the callee is there: nothing to tell apart
+    expect(rooms.whoSpoke("call-1")).toMatchObject({ note: "Mathias is not on the call." });
     await rooms.addOwner("call-1");
     await status("owner", "in-progress", "CA-leg-1");
     await status("owner", "human", "CA-leg-1", "voicemail");
-    await speech("CA-leg-1");
+    expect(rooms.whoSpoke("call-1").lastSpeaker).toMatch(/^unknown/);
+    await speech("CA-callee");
+    tick(4_000);
     await speech("CA-leg-1");
     await speech("CA-leg-1", "participant-speech-stop");
-    await speech("CA-agent"); // Jarvis himself
-    await expect(speech("CA-callee")).resolves.toMatchObject({ statusCode: 200 });
-    expect(context.mock.calls).toEqual([
-      ["call-1", "[Mathias is speaking now, from Mathias's own phone.]"],
-      ["call-1", "[The person you called is speaking now, from the line you called.]"],
-    ]);
+    await expect(speech("CA-agent")).resolves.toMatchObject({ statusCode: 200 }); // Jarvis himself
+    tick(2_000);
+    expect(rooms.whoSpoke("call-1")).toEqual({
+      lastSpeaker: "Mathias, on Mathias's own phone",
+      secondsAgo: 2,
+      before: "the person you called",
+    });
+    await speech("CA-callee");
+    expect(rooms.whoSpoke("call-1")).toMatchObject({ lastSpeaker: "the person you called" });
     await status("owner", "completed", "CA-leg-1");
-    await speech("CA-leg-1");
-    expect(context).toHaveBeenCalledTimes(2);
+    expect(rooms.whoSpoke("call-1")).toMatchObject({ note: "Mathias is not on the call." });
   });
 
   it("tells Jarvis when the owner does not answer", async () => {

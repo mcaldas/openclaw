@@ -36,29 +36,6 @@ export const modelQuietWindows = new Map<string, (ms: number) => void>();
 /** Long enough for those replies (0.5-1.5 s, starting within 1 s of the result). */
 export const SILENT_TOOL_QUIET_MS = 3_000;
 
-/** Per live call: add text to the model's context without asking it to reply. */
-export const modelContextNotes = new Map<string, (text: string) => boolean>();
-
-/**
- * The bridge API only sends user turns, which Gemini answers aloud. Google Live itself takes
- * client content with turnComplete false: context the model reads with the next turn, no reply.
- * That lives on the Google bridge's session; any other provider skips the note (false).
- */
-export function addSilentContext(session: RealtimeVoiceBridgeSession | undefined, text: string) {
-  try {
-    // SAFETY: optional shape check on the provider bridge; every member is tested before use.
-    const bridge = session?.bridge as { session?: { sendClientContent?: unknown } } | undefined;
-    const live = bridge?.session;
-    if (!live || typeof live.sendClientContent !== "function") {
-      return false;
-    }
-    live.sendClientContent({ turns: [{ role: "user", parts: [{ text }] }], turnComplete: false });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function wantsHoldGate(call: CallRecord): boolean {
   const room = call.metadata?.room;
   return Boolean(
@@ -274,8 +251,6 @@ export function createRealtimeCallPlayback(params: {
     quietUntil = Date.now() + ms;
   };
   modelQuietWindows.set(callId, quiet);
-  const addContext = (text: string) => addSilentContext(params.getSession(), text);
-  modelContextNotes.set(callId, addContext);
   if (room) {
     console.log(`[voice-call] hold gate detector=${room.detector} ${tag}`);
     roomHoldGates.set(callId, room.gate);
@@ -329,9 +304,6 @@ export function createRealtimeCallPlayback(params: {
     room?.close();
     if (modelQuietWindows.get(callId) === quiet) {
       modelQuietWindows.delete(callId);
-    }
-    if (modelContextNotes.get(callId) === addContext) {
-      modelContextNotes.delete(callId);
     }
     closeActivity();
   };

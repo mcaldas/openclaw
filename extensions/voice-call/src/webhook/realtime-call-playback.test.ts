@@ -2,7 +2,6 @@ import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeDtmfMulaw } from "../dtmf-tones.js";
 import {
-  addSilentContext,
   createRealtimeCallPlayback,
   modelQuietWindows,
   SILENT_TOOL_QUIET_MS,
@@ -52,29 +51,6 @@ function mediaAudio(messages: string[]): Buffer {
 }
 
 afterEach(() => vi.useRealTimers());
-
-describe("addSilentContext", () => {
-  it("adds text the model reads with its next turn, without asking for a reply", () => {
-    const sendClientContent = vi.fn();
-    const session = { bridge: { session: { sendClientContent } } };
-    expect(addSilentContext(session as never, "[Mathias is speaking now.]")).toBe(true);
-    expect(sendClientContent).toHaveBeenCalledWith({
-      turns: [{ role: "user", parts: [{ text: "[Mathias is speaking now.]" }] }],
-      turnComplete: false,
-    });
-  });
-
-  it("skips the note on other providers or before the bridge exists", () => {
-    expect(addSilentContext({ bridge: {} } as never, "x")).toBe(false);
-    expect(addSilentContext(undefined, "x")).toBe(false);
-    const throwing = {
-      get bridge(): never {
-        throw new Error("not bound yet");
-      },
-    };
-    expect(addSilentContext(throwing as never, "x")).toBe(false);
-  });
-});
 
 describe("model quiet window", () => {
   it("drops the model's reply to a silent tool for a few seconds, then plays it again", async () => {

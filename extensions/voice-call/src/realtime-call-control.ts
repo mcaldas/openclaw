@@ -54,6 +54,19 @@ export function buildAddOwnerTool(ownerName: string): RealtimeVoiceTool {
   };
 }
 
+/** Stable provider-facing tool name for asking which phone leg spoke last in a room call. */
+export const REALTIME_VOICE_WHO_SPOKE_TOOL_NAME = "openclaw_who_spoke";
+
+/** Room calls only: who spoke last, by phone line (Twilio speaker events), not by voice. */
+export function buildWhoSpokeTool(ownerName: string): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_VOICE_WHO_SPOKE_TOOL_NAME,
+    description: `While ${ownerName} and the other person are both on the call, tells you who spoke last and who before, by their phone line, which is certain even when their voices sound alike. Call it before you answer either of them, then answer that person.`,
+    parameters: { type: "object", properties: {} },
+  };
+}
+
 /** Merge built-in call controls with consult and configured realtime tools. */
 export function resolveVoiceCallRealtimeTools(
   policy: RealtimeVoiceAgentConsultToolPolicy,

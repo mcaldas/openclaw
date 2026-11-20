@@ -32,6 +32,7 @@ import type { TwilioProvider } from "./providers/twilio.js";
 import { buildRealtimeVoiceInstructions } from "./realtime-agent-context.js";
 import {
   buildAddOwnerTool,
+  buildWhoSpokeTool,
   REALTIME_VOICE_SEND_DTMF_TOOL_NAME,
   resolveVoiceCallRealtimeTools,
 } from "./realtime-call-control.js";
@@ -273,7 +274,11 @@ export async function createVoiceCallRuntime(params: {
         config.realtime.toolPolicy,
         config.realtime.tools,
         config.room?.enabled
-          ? [buildAddOwnerTool(config.room.ownerName ?? "the owner"), PHONE_MENU_TOOL]
+          ? [
+              buildAddOwnerTool(config.room.ownerName ?? "the owner"),
+              buildWhoSpokeTool(config.room.ownerName ?? "the owner"),
+              PHONE_MENU_TOOL,
+            ]
           : [],
       ),
     };
