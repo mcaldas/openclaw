@@ -112,20 +112,73 @@ export function findSpeechSegments(samples: Int16Array, rate: number): SpeechSeg
     if ((run.to - run.from) * FRAME_SECONDS < MIN_SEGMENT_SECONDS) {
       continue;
     }
-    for (let from = run.from; from < run.to; from += maxFrames) {
-      const to = Math.min(run.to, from + maxFrames);
-      const window = levels.slice(from, to);
-      const music =
-        window.length >= 150 &&
-        classifyWindow(window, { lowEnergyRatio: 0.25, silenceRms: 0.0056 }) === "music";
-      segments.push({
-        start: Math.max(0, from * FRAME_SECONDS - PAD_SECONDS),
-        end: Math.min(total, to * FRAME_SECONDS + PAD_SECONDS),
-        music,
-      });
+    for (const piece of splitByKind(levels, run.from, run.to)) {
+      for (let from = piece.from; from < piece.to; from += maxFrames) {
+        const to = Math.min(piece.to, from + maxFrames);
+        segments.push({
+          start: Math.max(0, from * FRAME_SECONDS - PAD_SECONDS),
+          end: Math.min(total, to * FRAME_SECONDS + PAD_SECONDS),
+          music: piece.music,
+        });
+      }
     }
   }
   return segments;
+}
+
+const BLOCK_FRAMES = 25;
+const WINDOW_FRAMES = 75;
+const MIN_PIECE_BLOCKS = 3;
+
+/**
+ * Hold music often runs straight into a person's voice with no pause. Label each half-second
+ * by the 1.5 s window around it and cut where music turns to speech, so the speech keeps its own
+ * start time. Pieces under 1.5 s join their neighbour; runs under 3 s are speech.
+ */
+function splitByKind(
+  levels: readonly number[],
+  from: number,
+  to: number,
+): { from: number; to: number; music: boolean }[] {
+  if (to - from < 150) {
+    return [{ from, to, music: false }];
+  }
+  const pieces: { from: number; to: number; music: boolean }[] = [];
+  for (let block = from; block < to; block += BLOCK_FRAMES) {
+    const windowFrom = Math.max(from, Math.min(block - BLOCK_FRAMES, to - WINDOW_FRAMES));
+    const music =
+      classifyWindow(levels.slice(windowFrom, windowFrom + WINDOW_FRAMES), {
+        lowEnergyRatio: 0.25,
+        silenceRms: 0.0056,
+      }) === "music";
+    const end = Math.min(to, block + BLOCK_FRAMES);
+    const last = pieces.at(-1);
+    if (last && last.music === music) {
+      last.to = end;
+    } else {
+      pieces.push({ from: block, to: end, music });
+    }
+  }
+  // A short piece is a misread (a song transition, a breath): it takes its neighbour's kind.
+  const merged: typeof pieces = [];
+  for (const piece of pieces) {
+    const last = merged.at(-1);
+    if (
+      last &&
+      (piece.to - piece.from < MIN_PIECE_BLOCKS * BLOCK_FRAMES || last.music === piece.music)
+    ) {
+      last.to = piece.to;
+    } else {
+      merged.push({ ...piece });
+    }
+  }
+  const first = merged[0];
+  const second = merged[1];
+  if (first && second && first.to - first.from < MIN_PIECE_BLOCKS * BLOCK_FRAMES) {
+    second.from = first.from;
+    merged.shift();
+  }
+  return merged;
 }
 
 function clock(seconds: number): string {

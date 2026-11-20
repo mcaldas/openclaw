@@ -80,6 +80,21 @@ describe("findSpeechSegments", () => {
   });
 });
 
+describe("findSpeechSegments with music running into speech", () => {
+  it("starts the speech where the music ends, not at the start of the music", () => {
+    const segments = findSpeechSegments(
+      audio([
+        ["music", 12],
+        ["speech", 4],
+      ]),
+      RATE,
+    );
+    expect(segments.map((segment) => segment.music)).toEqual([true, false]);
+    expect(segments[1]?.start).toBeGreaterThan(10.5);
+    expect(segments[1]?.start).toBeLessThan(12.5);
+  });
+});
+
 describe("buildSpeakerTranscript", () => {
   it("merges each person's channel with the assistant's own words, by time", async () => {
     const dir = await tempDir();
