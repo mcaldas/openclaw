@@ -83,6 +83,10 @@ export function wireCallRooms(params: {
       gate.holdNow();
       if (gate.mode === "hold") {
         const how = await gate.whenHoldEnds();
+        if (how === "speech") {
+          // Answering now would make Gemini judge a person by their first word.
+          await gate.whenSpeechPauses();
+        }
         params.log.info(`[voice-call] phone menu hold ended (${how}) callId=${callId}`);
         return phoneMenuHoldEnded(how);
       }

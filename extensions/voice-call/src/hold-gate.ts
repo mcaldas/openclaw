@@ -144,6 +144,17 @@ export function createHoldGate(
   let checkGeneration = 0;
   /** Callers waiting for this hold to end (the model's own "hold" tool call waits here). */
   let holdWaiters: ((how: "speech" | "release") => void)[] = [];
+  /** Callers waiting for the person who woke the line to pause, with frames left to wait. */
+  let pauseWaiters: { resolve: () => void; framesLeft: number }[] = [];
+  const settlePauseWaiters = (all: boolean) => {
+    const keep = all ? [] : pauseWaiters.filter((w) => w.framesLeft > 0);
+    for (const waiter of pauseWaiters) {
+      if (all || waiter.framesLeft <= 0) {
+        waiter.resolve();
+      }
+    }
+    pauseWaiters = keep;
+  };
   const settleWaiters = (how: "speech" | "release") => {
     const waiting = holdWaiters;
     holdWaiters = [];
@@ -231,6 +242,12 @@ export function createHoldGate(
     if (graceFrames > 0) {
       graceFrames -= 1;
     }
+    if (pauseWaiters.length > 0) {
+      for (const waiter of pauseWaiters) {
+        waiter.framesLeft -= 1;
+      }
+      settlePauseWaiters(false);
+    }
     sinceHop += 1;
     if (sinceHop < hopFrames || levels.length < windowFrames) {
       return;
@@ -241,6 +258,9 @@ export function createHoldGate(
     speechRun = kind === "speech" ? speechRun + 1 : 0;
     musicRun = holdsLine ? musicRun + 1 : 0;
     quietRun = kind === "speech" ? 0 : quietRun + 1;
+    if (quietRun >= 1 && pauseWaiters.length > 0) {
+      settlePauseWaiters(true);
+    }
     if (ignoreSpeech && (quietRun >= 2 || ++ignoredHops >= 12)) {
       ignoreSpeech = false;
     }
@@ -264,6 +284,7 @@ export function createHoldGate(
     if (was === "hold") {
       settleWaiters("release");
     }
+    settlePauseWaiters(true);
     mode = "live";
     frames = [];
     levels = [];
@@ -317,6 +338,18 @@ export function createHoldGate(
       // The recording that prompted this is still playing: it must not wake the gate again.
       ignoreSpeech = true;
       ignoredHops = 0;
+    },
+    /**
+     * After a wake: resolves once the speaker pauses (one quiet window) or after `maxMs`, so the
+     * model hears a whole first sentence before it must judge person or recording.
+     */
+    whenSpeechPauses(maxMs = 6_000): Promise<void> {
+      if (!enabled || mode !== "probe") {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        pauseWaiters.push({ resolve, framesLeft: Math.round(maxMs / 20) });
+      });
     },
     /** Resolves when this hold ends: "speech" when someone speaks, "release" otherwise. */
     whenHoldEnds(): Promise<"speech" | "release"> {

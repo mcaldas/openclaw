@@ -275,6 +275,25 @@ describe("createHoldGate with Silero probabilities", () => {
     await expect(gate.whenHoldEnds()).resolves.toBe("release");
   });
 
+  it("lets the model hear a whole first sentence before its hold call returns", async () => {
+    const { gate, say } = sileroGate();
+    feed(gate, music(12_000));
+    const ended = gate.whenHoldEnds();
+    say(1_000); // a person starts talking: the hold ends...
+    await expect(ended).resolves.toBe("speech");
+    const paused = gate.whenSpeechPauses();
+    let done = false;
+    void paused.then(() => (done = true));
+    say(3_000); // ...but they are still mid-sentence
+    await Promise.resolve();
+    expect(done).toBe(false);
+    feed(gate, music(2_000)); // they pause
+    await expect(paused).resolves.toBeUndefined();
+    const capped = gate.whenSpeechPauses(1_000);
+    say(1_500); // someone who never pauses: the wait is capped
+    await expect(capped).resolves.toBeUndefined();
+  });
+
   it("holds at once when the model says so, and its reply does not end the hold", () => {
     const { events, gate } = sileroGate();
     feed(gate, speech(2_000));
