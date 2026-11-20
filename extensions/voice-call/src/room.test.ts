@@ -39,7 +39,7 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     hangupLeg: vi.fn(async () => {}),
   };
   const note = vi.fn();
-  const releaseHold = vi.fn();
+  const allowHold = vi.fn();
   const rooms = createCallRooms({
     config: {
       fromNumber: "+972500000002",
@@ -52,15 +52,19 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     carrier,
     webhookUrl: () => "https://gw.example/voice/webhook",
     note,
-    releaseHold,
+    allowHold,
     recordOwner: () => true,
     now: () => clock,
     log: () => {},
   });
-  const status = (leg: "agent" | "owner", CallStatus: string) =>
+  const status = (leg: "agent" | "owner", CallStatus: string, CallSid = "", check?: string) =>
     rooms.routeWebhook(
-      { callId: "call-1", type: "room", leg },
-      new URLSearchParams({ CallStatus }),
+      { callId: "call-1", type: "room", leg, ...(check ? { check } : {}) },
+      new URLSearchParams({
+        CallStatus,
+        CallSid,
+        ...(check ? { AnsweredBy: CallStatus } : {}),
+      }),
       () => ({ statusCode: 500, body: "" }),
     );
   return {
@@ -68,7 +72,7 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     manager,
     carrier,
     note,
-    releaseHold,
+    allowHold,
     status,
     tick: (ms: number) => (clock += ms),
   };
@@ -106,6 +110,7 @@ describe("createCallRooms", () => {
       to: `app:${APP}?callId=call-1&leg=agent`,
       from: "+972500000002",
       statusCallback: "https://gw.example/voice/webhook?callId=call-1&type=room&leg=agent",
+      timeLimitSeconds: 3720,
     });
     expect(roomOf(call)?.agentCallSid).toBe("CA-leg-1");
     rooms.hooks.onAnswered(call);
@@ -135,9 +140,9 @@ describe("createCallRooms", () => {
     expect(rooms.hooks.pressKeys(makeCall(undefined), "1")).toBeUndefined();
   });
 
-  it("rings the owner, then wakes Jarvis with a note when the owner joins", async () => {
+  it("rings the owner, checks for voicemail, then tells Jarvis the owner joined", async () => {
     const call = makeCall({ agentCallSid: "CA-agent" });
-    const { rooms, carrier, note, releaseHold, status } = setup(call);
+    const { rooms, carrier, note, allowHold, status } = setup(call);
     const result = await rooms.addOwner("call-1");
     expect(result).toMatchObject({ calling: "Mathias" });
     expect(carrier.addParticipant).toHaveBeenCalledWith("oc-call-1", {
@@ -146,23 +151,66 @@ describe("createCallRooms", () => {
       statusCallback: "https://gw.example/voice/webhook?callId=call-1&type=room&leg=owner",
       timeoutSeconds: 25,
       record: true,
+      detectVoicemail: true,
+      timeLimitSeconds: 3720,
     });
     await expect(rooms.addOwner("call-1")).resolves.toMatchObject({ error: expect.any(String) });
-    await status("owner", "ringing");
-    await status("owner", "in-progress");
-    expect(roomOf(call)).toMatchObject({ owner: "in-room", ownerCallSid: "CA-leg-1" });
-    expect(releaseHold).toHaveBeenCalledWith("call-1");
+    await status("owner", "ringing", "CA-leg-1");
+    await status("owner", "in-progress", "CA-leg-1");
+    expect(roomOf(call)).toMatchObject({
+      owner: "answering",
+      ownerCallSid: "CA-leg-1",
+      ownerLegs: [{ callSid: "CA-leg-1", answeredAt: 10_000 }],
+    });
+    expect(allowHold).toHaveBeenCalledWith("call-1", false);
+    expect(note).not.toHaveBeenCalled();
+    await status("owner", "human", "CA-leg-1", "voicemail");
+    expect(roomOf(call)?.owner).toBe("in-room");
     expect(note).toHaveBeenCalledWith("call-1", expect.stringContaining("Mathias has just joined"));
+  });
+
+  it("hangs up the owner's voicemail and tells Jarvis the owner did not answer", async () => {
+    const call = makeCall({});
+    const { rooms, carrier, note, status, allowHold } = setup(call);
+    await rooms.addOwner("call-1");
+    await status("owner", "in-progress", "CA-leg-1");
+    await status("owner", "machine_end_beep", "CA-leg-1", "voicemail");
+    expect(carrier.hangupLeg).toHaveBeenCalledWith("CA-leg-1");
+    expect(roomOf(call)?.owner).toBe("no-answer");
+    expect(allowHold).toHaveBeenLastCalledWith("call-1", true);
+    expect(note).toHaveBeenCalledWith("call-1", expect.stringContaining("did not answer"));
+    // Late callbacks from that leg change nothing.
+    await status("owner", "in-progress", "CA-leg-1");
+    expect(roomOf(call)?.owner).toBe("no-answer");
   });
 
   it("tells Jarvis when the owner does not answer", async () => {
     const call = makeCall({});
     const { rooms, note, status, manager } = setup(call);
     await rooms.addOwner("call-1");
-    await status("owner", "no-answer");
+    await status("owner", "no-answer", "CA-leg-1");
     expect(roomOf(call)?.owner).toBe("no-answer");
     expect(note).toHaveBeenCalledWith("call-1", expect.stringContaining("did not answer"));
     expect(manager.endCall).not.toHaveBeenCalled();
+  });
+
+  it("ignores a callback from an earlier owner leg", async () => {
+    const call = makeCall({ owner: "no-answer", ownerCallSid: "CA-old" });
+    const { rooms, status } = setup(call);
+    await rooms.addOwner("call-1");
+    await status("owner", "completed", "CA-old");
+    expect(roomOf(call)?.owner).toBe("ringing");
+  });
+
+  it("drops the owner's ring when the call ended meanwhile", async () => {
+    const call = makeCall({});
+    const { rooms, carrier } = setup(call);
+    carrier.addParticipant.mockImplementationOnce(async () => {
+      call.state = "completed";
+      return { callSid: "CA-late" };
+    });
+    await expect(rooms.addOwner("call-1")).resolves.toMatchObject({ error: expect.any(String) });
+    expect(carrier.hangupLeg).toHaveBeenCalledWith("CA-late");
   });
 
   it("hands over: only Jarvis leaves, and the owner's hang-up then ends the call", async () => {
@@ -174,10 +222,19 @@ describe("createCallRooms", () => {
     // The stream's own disconnect asks again; nothing more happens.
     await expect(rooms.hooks.handOver(call)).resolves.toBe(true);
     expect(carrier.hangupLeg).toHaveBeenCalledTimes(1);
-    await status("agent", "completed");
+    await status("agent", "completed", "CA-agent");
     expect(manager.endCall).not.toHaveBeenCalled();
-    await status("owner", "completed");
+    await status("owner", "completed", "CA-owner");
     expect(manager.endCall).toHaveBeenCalledWith("call-1", { reason: "hangup-user" });
+  });
+
+  it("does not leave the callee alone when the owner hangs up during the hand-over", async () => {
+    const call = makeCall({ agentCallSid: "CA-agent", owner: "in-room", ownerCallSid: "CA-owner" });
+    const { rooms, carrier, status } = setup(call);
+    carrier.hangupLeg.mockImplementationOnce(async () => {
+      await status("owner", "completed", "CA-owner");
+    });
+    await expect(rooms.hooks.handOver(call)).resolves.toBe(false);
   });
 
   it("does not hand over without the owner in the room", async () => {
@@ -190,7 +247,9 @@ describe("createCallRooms", () => {
   it("ends the call when Jarvis's leg drops with only the callee left", async () => {
     const call = makeCall({ agentCallSid: "CA-agent" });
     const { manager, status } = setup(call);
-    await status("agent", "failed");
+    await status("agent", "failed", "CA-other");
+    expect(manager.endCall).not.toHaveBeenCalled();
+    await status("agent", "failed", "CA-agent");
     expect(manager.endCall).toHaveBeenCalledWith("call-1", { reason: "error" });
   });
 
@@ -222,15 +281,32 @@ describe("createCallRooms", () => {
     expect(agentStream).not.toHaveBeenCalled();
   });
 
+  it("opens no second stream after the hand-over or for a finished App leg", async () => {
+    const agentStream = vi.fn();
+    const gone = setup(makeCall({ agentGone: true }));
+    await gone.rooms.routeWebhook(
+      { leg: "agent" },
+      new URLSearchParams({ callId: "call-1" }),
+      agentStream,
+    );
+    const live = setup(makeCall({}));
+    const done = await live.rooms.routeWebhook(
+      { leg: "agent" },
+      new URLSearchParams({ callId: "call-1", CallStatus: "completed" }),
+      agentStream,
+    );
+    expect(done?.body).not.toContain("<Hangup/>");
+    expect(agentStream).not.toHaveBeenCalled();
+  });
+
   it("hangs up the legs it added once the call ends", async () => {
     const call = makeCall({ agentCallSid: "CA-agent", ownerCallSid: "CA-owner" });
-    const { rooms, carrier, releaseHold } = setup(call);
+    const { rooms, carrier } = setup(call);
     rooms.observe(call);
     expect(carrier.hangupLeg).not.toHaveBeenCalled();
     call.state = "completed";
     rooms.observe(call);
     rooms.observe(call);
     expect(carrier.hangupLeg.mock.calls).toEqual([["CA-agent"], ["CA-owner"]]);
-    expect(releaseHold).toHaveBeenCalledWith("call-1");
   });
 });

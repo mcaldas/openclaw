@@ -2,6 +2,7 @@ import type http from "node:http";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { VoiceCallConfig } from "./config.js";
 import type { CallRoomApi } from "./providers/base.js";
+import { isProviderStatusTerminal } from "./providers/shared/call-status.js";
 import {
   TerminalStates,
   type CallId,
@@ -20,9 +21,11 @@ export type RoomState = {
   /** Jarvis's leg: a TwiML App participant whose Voice URL opens the realtime stream. */
   agentCallSid?: string;
   agentGone?: boolean;
+  /** The owner's current leg. "answering" waits for the human-or-voicemail check. */
   ownerCallSid?: string;
-  owner?: "ringing" | "in-room" | "no-answer" | "left";
-  ownerAnsweredAt?: number;
+  owner?: "ringing" | "answering" | "in-room" | "no-answer" | "left";
+  /** Every owner leg that answered, so each recording is collected. */
+  ownerLegs?: { callSid: string; answeredAt: number }[];
 };
 
 /** Hooks the call manager uses for calls that run in a room. */
@@ -62,6 +65,11 @@ const ENDED_STATUSES = new Set(["completed", "busy", "no-answer", "failed", "can
 const HOP_SETTLE_MS = 800;
 const HOP_MS_PER_KEY = 300;
 const DUPLICATE_KEYS_MS = 1_000;
+/** The owner counts as joined if the voicemail check never reports (it gives up after 5 s). */
+const OWNER_CHECK_FALLBACK_MS = 8_000;
+/** Legs outlive a crashed gateway only this long past the call's limit. */
+const LEG_LIMIT_MARGIN_SECONDS = 120;
+const CLOSED_RETENTION_MS = 10 * 60_000;
 
 function isRoomState(value: unknown): value is RoomState {
   return (
@@ -96,8 +104,8 @@ export function createCallRooms(deps: {
   webhookUrl: () => string | null;
   /** A note to Jarvis: it starts a model turn with these instructions. */
   note: (callId: CallId, instructions: string) => void;
-  /** A person joined: stop holding so Jarvis hears everything. */
-  releaseHold: (callId: CallId) => void;
+  /** Off while the owner is on the line: Jarvis must hear everything then, music or not. */
+  allowHold: (callId: CallId, allowed: boolean) => void;
   recordOwner: (call: CallRecord) => boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -105,6 +113,7 @@ export function createCallRooms(deps: {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((message: string) => console.log(`[voice-call] ${message}`));
   const ownerName = deps.config.room?.ownerName ?? "the owner";
+  const timeLimitSeconds = (deps.config.maxDurationSeconds ?? 3600) + LEG_LIMIT_MARGIN_SECONDS;
   const keys = new Map<CallId, { busyUntil: number; last?: { digits: string; at: number } }>();
   const joining = new Set<CallId>();
   const closed = new Set<CallId>();
@@ -120,6 +129,9 @@ export function createCallRooms(deps: {
     url.searchParams.set("leg", leg);
     return url.toString();
   };
+
+  const isLive = (call: CallRecord) =>
+    deps.manager.getCall(call.callId) === call && !TerminalStates.has(call.state);
 
   const patch = (call: CallRecord, change: Partial<RoomState>) =>
     deps.manager
@@ -142,6 +154,27 @@ export function createCallRooms(deps: {
     });
   };
 
+  const notes = {
+    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you.`,
+    noAnswer: `${ownerName} did not answer. Tell the other person briefly, then carry on with the task yourself, or ask for a direct number or a good time for ${ownerName} to call back.`,
+    left: `${ownerName} has left the call. Carry on with the task yourself; if it is done, say goodbye and end the call.`,
+  };
+
+  const ownerJoined = async (call: CallRecord, callSid: string) => {
+    const room = roomOf(call);
+    if (!isLive(call) || room?.owner !== "answering" || room.ownerCallSid !== callSid) {
+      return;
+    }
+    await patch(call, { owner: "in-room" });
+    deps.note(call.callId, notes.joined);
+  };
+
+  const ownerMissed = async (call: CallRecord) => {
+    await patch(call, { owner: "no-answer" });
+    deps.allowHold(call.callId, true);
+    deps.note(call.callId, notes.noAnswer);
+  };
+
   const hooks: CallRoomHooks = {
     onAnswered(call) {
       const room = roomOf(call);
@@ -157,6 +190,7 @@ export function createCallRooms(deps: {
             to: `app:${appSid}?callId=${encodeURIComponent(call.callId)}&leg=agent`,
             from,
             statusCallback: legUrl(call.callId, "agent"),
+            timeLimitSeconds,
           }),
         )
         .then(async ({ callSid }) => {
@@ -180,15 +214,14 @@ export function createCallRooms(deps: {
       keys.set(call.callId, state);
       // Realtime models sometimes call the tool twice for one press.
       if (state.last?.digits === digits && at - state.last.at < DUPLICATE_KEYS_MS) {
-        return Promise.resolve("duplicate");
+        return Promise.resolve("duplicate" as const);
       }
       if (at < state.busyUntil) {
         return Promise.reject(new Error("Still pressing the previous keys; wait for the menu"));
       }
       state.last = { digits, at };
       state.busyUntil = Number.POSITIVE_INFINITY;
-      const leg = call.providerCallId;
-      return deps.carrier.pressKeys(leg, room.name, digits).then(
+      return deps.carrier.pressKeys(call.providerCallId, room.name, digits).then(
         () => {
           state.busyUntil = now() + HOP_SETTLE_MS + HOP_MS_PER_KEY * digits.length;
           return "sent" as const;
@@ -210,51 +243,80 @@ export function createCallRooms(deps: {
         await deps.carrier.hangupLeg(room.agentCallSid);
       }
       await patch(call, { agentGone: true });
-      return true;
+      // The owner may have hung up meanwhile; then nobody is with the callee and the call must end.
+      return roomOf(call)?.owner === "in-room";
     },
   };
 
   /** Owner and Jarvis legs report here, never to the call's own state machine. */
-  const onLegStatus = async (callId: CallId, leg: "agent" | "owner", status: string) => {
+  const onLegStatus = async (
+    callId: CallId,
+    leg: "agent" | "owner",
+    form: URLSearchParams,
+    voicemailCheck: boolean,
+  ) => {
     const call = deps.manager.getCall(callId);
     const room = roomOf(call);
     if (!call || !room || TerminalStates.has(call.state)) {
       return;
     }
+    const status = form.get("CallStatus") ?? "";
+    const callSid = form.get("CallSid") ?? "";
     const ended = ENDED_STATUSES.has(status);
-    log(`room ${room.name}: ${leg} leg ${status}`);
+    log(
+      `room ${room.name}: ${leg} leg ${voicemailCheck ? `check ${form.get("AnsweredBy")}` : status}`,
+    );
     if (leg === "agent") {
-      if (ended && !room.agentGone) {
+      if (ended && !room.agentGone && (!room.agentCallSid || callSid === room.agentCallSid)) {
         await patch(call, { agentGone: true });
-        if (room.owner !== "in-room") {
+        if (roomOf(call)?.owner !== "in-room") {
           end(callId, "Jarvis's leg ended and nobody else is with the callee", "error");
         }
       }
       return;
     }
-    if (status === "in-progress" && room.owner !== "in-room") {
-      await patch(call, { owner: "in-room", ownerAnsweredAt: now() });
-      deps.releaseHold(callId);
-      deps.note(
-        callId,
-        `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you.`,
-      );
-    } else if (ended && room.owner === "in-room") {
+    // A callback from an earlier owner leg must not change the current one.
+    if (room.ownerCallSid && callSid && callSid !== room.ownerCallSid) {
+      return;
+    }
+    if (voicemailCheck) {
+      const answeredBy = form.get("AnsweredBy") ?? "unknown";
+      if (room.owner !== "answering") {
+        return;
+      }
+      if (/^machine|^fax/.test(answeredBy)) {
+        log(`room ${room.name}: ${ownerName}'s voicemail answered; hanging up that leg`);
+        await deps.carrier.hangupLeg(callSid).catch(() => undefined);
+        await ownerMissed(call);
+      } else {
+        await ownerJoined(call, callSid);
+      }
+      return;
+    }
+    if (status === "in-progress" && room.owner === "ringing") {
+      const answeredAt = now();
+      await patch(call, {
+        owner: "answering",
+        ownerCallSid: callSid || room.ownerCallSid,
+        ownerLegs: [...(room.ownerLegs ?? []), { callSid, answeredAt }],
+      });
+      deps.allowHold(callId, false);
+      setTimeout(() => void ownerJoined(call, callSid), OWNER_CHECK_FALLBACK_MS).unref?.();
+      return;
+    }
+    if (!ended) {
+      return;
+    }
+    if (room.owner === "in-room") {
       await patch(call, { owner: "left" });
-      if (room.agentGone) {
+      deps.allowHold(callId, true);
+      if (roomOf(call)?.agentGone) {
         end(callId, `${ownerName} hung up after the hand-over`, "hangup-user");
       } else {
-        deps.note(
-          callId,
-          `${ownerName} has left the call. Carry on with the task yourself; if it is done, say goodbye and end the call.`,
-        );
+        deps.note(callId, notes.left);
       }
-    } else if (ended && room.owner === "ringing") {
-      await patch(call, { owner: "no-answer" });
-      deps.note(
-        callId,
-        `${ownerName} did not answer. Tell the other person briefly, then carry on with the task yourself, or ask for a direct number or a good time for ${ownerName} to call back.`,
-      );
+    } else if (room.owner === "ringing" || room.owner === "answering") {
+      await ownerMissed(call);
     }
   };
 
@@ -267,9 +329,9 @@ export function createCallRooms(deps: {
       if (!call || !room || TerminalStates.has(call.state)) {
         return { error: "This call has no room, so nobody can be added to it" };
       }
-      if (room.owner === "ringing" || room.owner === "in-room") {
+      if (room.owner === "ringing" || room.owner === "answering" || room.owner === "in-room") {
         return {
-          error: `${ownerName} is already ${room.owner === "ringing" ? "being called" : "on the call"}`,
+          error: `${ownerName} is already ${room.owner === "in-room" ? "on the call" : "being called"}`,
         };
       }
       const to = deps.config.room?.ownerNumber ?? deps.config.toNumber;
@@ -278,17 +340,31 @@ export function createCallRooms(deps: {
         return { error: `No phone number is configured for ${ownerName}` };
       }
       const ringSeconds = deps.config.room?.ownerRingSeconds ?? 25;
+      // Marked before dialling, so even an instant failure callback finds the ring it belongs to.
+      await patch(call, { owner: "ringing", ownerCallSid: undefined });
+      let legSid: string;
       try {
-        const leg = await deps.carrier.addParticipant(room.name, {
-          to,
-          from,
-          statusCallback: legUrl(callId, "owner"),
-          timeoutSeconds: ringSeconds,
-          record: deps.recordOwner(call),
-        });
-        await patch(call, { owner: "ringing", ownerCallSid: leg.callSid });
+        legSid = (
+          await deps.carrier.addParticipant(room.name, {
+            to,
+            from,
+            statusCallback: legUrl(callId, "owner"),
+            timeoutSeconds: ringSeconds,
+            record: deps.recordOwner(call),
+            detectVoicemail: true,
+            timeLimitSeconds,
+          })
+        ).callSid;
       } catch (err) {
+        await patch(call, { owner: room.owner });
         return { error: `Could not call ${ownerName}: ${formatErrorMessage(err)}` };
+      }
+      if (!isLive(call)) {
+        await deps.carrier.hangupLeg(legSid).catch(() => undefined);
+        return { error: "The call ended while ringing" };
+      }
+      if (!roomOf(call)?.ownerCallSid) {
+        await patch(call, { ownerCallSid: legSid });
       }
       return {
         calling: ownerName,
@@ -313,14 +389,22 @@ export function createCallRooms(deps: {
       }
       const callId = param("callId") ?? "";
       if (query?.type === ROOM_STATUS_TYPE) {
-        await onLegStatus(callId, leg, form.get("CallStatus") ?? "");
+        await onLegStatus(callId, leg, form, query?.check === "voicemail");
         return twiml("");
       }
       const call = deps.manager.getCall(callId);
       const room = roomOf(call);
-      if (leg !== "agent" || !call?.providerCallId || !room || TerminalStates.has(call.state)) {
+      const status = form.get("CallStatus");
+      if (
+        leg !== "agent" ||
+        !call?.providerCallId ||
+        !room ||
+        room.agentGone ||
+        TerminalStates.has(call.state) ||
+        (status && isProviderStatusTerminal(status))
+      ) {
         log(`room refused a ${leg} leg request callId=${callId || "missing"}`);
-        return twiml("<Hangup/>");
+        return twiml(status && isProviderStatusTerminal(status) ? "" : "<Hangup/>");
       }
       log(`room ${room.name}: Jarvis's stream opening`);
       return agentStream({ callId, providerCallId: call.providerCallId });
@@ -333,8 +417,8 @@ export function createCallRooms(deps: {
         return;
       }
       closed.add(call.callId);
+      setTimeout(() => closed.delete(call.callId), CLOSED_RETENTION_MS).unref?.();
       keys.delete(call.callId);
-      deps.releaseHold(call.callId);
       for (const sid of [room.agentGone ? undefined : room.agentCallSid, room.ownerCallSid]) {
         if (sid) {
           void deps.carrier.hangupLeg(sid).catch((err: unknown) => {

@@ -72,6 +72,7 @@ export function createHoldGate(
     silenceRms: options.silenceRms ?? 0.0056,
   };
   let mode: HoldGateMode = "live";
+  let enabled = true;
   let frames: Buffer[] = [];
   let levels: number[] = [];
   let pending = Buffer.alloc(0);
@@ -119,27 +120,37 @@ export function createHoldGate(
     }
   };
 
+  const release = () => {
+    const was = mode;
+    mode = "live";
+    frames = [];
+    levels = [];
+    pending = Buffer.alloc(0);
+    resetRuns();
+    if (was !== "live") {
+      onEvent("release");
+    }
+  };
+
   return {
     get mode(): HoldGateMode {
       return mode;
     },
-    /** Back to normal and forget the history: a person joined or the call ended. */
-    release(): void {
-      const was = mode;
-      mode = "live";
-      frames = [];
-      levels = [];
-      pending = Buffer.alloc(0);
-      resetRuns();
-      if (was !== "live") {
-        onEvent("release");
+    /**
+     * Off: a person who cannot be missed is on the line (the owner joined), so the model hears
+     * everything, music included. On again once they leave.
+     */
+    setEnabled(on: boolean): void {
+      enabled = on;
+      if (!on) {
+        release();
       }
     },
     /** The assistant is speaking: a conversation is on, so neither hold nor probe applies. */
     noteAssistantSpeech(): void {
-      if (mode === "probe") {
+      if (mode !== "live") {
         enter("live", "release");
-      } else if (mode === "live") {
+      } else {
         musicRun = 0;
       }
     },
@@ -148,6 +159,9 @@ export function createHoldGate(
      * length while holding, or, on the frame that ends a hold, the last seconds of the line.
      */
     accept(audio: Buffer): Buffer {
+      if (!enabled) {
+        return audio;
+      }
       const holding = mode === "hold";
       let data = pending.length > 0 ? Buffer.concat([pending, audio]) : audio;
       while (data.length >= FRAME_BYTES) {

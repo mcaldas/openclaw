@@ -548,6 +548,9 @@ export class TwilioProvider implements VoiceCallProvider {
         leg.AmdStatusCallback = params.AsyncAmdStatusCallback;
         leg.AmdStatusCallbackMethod = "POST";
       }
+      if (input.timeLimitSeconds) {
+        leg.TimeLimit = String(input.timeLimitSeconds);
+      }
       const joined = await this.room.join(input.room, leg);
       this.callWebhookUrls.set(joined.callSid, url.toString());
       return {

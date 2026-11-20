@@ -155,6 +155,8 @@ export type InitiateCallInput = {
   voicemail?: Omit<VoiceCallConfig["voicemail"], "holdOpeningMaxMs">;
   /** Room calls: the callee joins this conference room instead of running webhook TwiML. */
   room?: string;
+  /** Room calls: hard cap on the callee's leg, which no longer ends with Jarvis's stream. */
+  timeLimitSeconds?: number;
 };
 
 export type InitiateCallResult = {

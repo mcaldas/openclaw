@@ -194,12 +194,16 @@ export async function buildSpeakerTranscript(params: {
       params.warn?.(`speaker transcript skipped ${leg.label}: ${formatErrorMessage(error)}`);
     }
   }
+  // In call order, so a long queue on one leg cannot crowd out the other leg's words.
+  const at = (job: (typeof jobs)[number]) => job.leg.startedAt + job.segment.start * 1000;
+  const todo = jobs.toSorted((a, b) => at(a) - at(b)).slice(0, maxSegments);
   if (jobs.length > maxSegments) {
     params.warn?.(
       `speaker transcript: ${jobs.length - maxSegments} late utterances not transcribed`,
     );
   }
-  const todo = jobs.slice(0, maxSegments);
+  let heard = 0;
+  let failed = 0;
   await fs.mkdir(params.workDir, { recursive: true, mode: 0o700 });
   try {
     let next = 0;
@@ -218,10 +222,12 @@ export async function buildSpeakerTranscript(params: {
         await fs.writeFile(file, encodeWavMono(slice, rate), { mode: 0o600 });
         const text = parseModelText(
           await params.transcribe(file).catch((error: unknown) => {
+            failed += 1;
             params.warn?.(`speaker transcript segment failed: ${formatErrorMessage(error)}`);
             return undefined;
           }),
         );
+        heard += text ? 1 : 0;
         await fs.rm(file, { force: true });
         if (text) {
           lines.push({ at: leg.startedAt + segment.start * 1000, label: leg.label, text });
@@ -232,8 +238,17 @@ export async function buildSpeakerTranscript(params: {
   } finally {
     await fs.rm(params.workDir, { recursive: true, force: true });
   }
-  return lines
+  // Nothing heard although people spoke (no audio model, or every request failed): an empty
+  // result keeps the live transcript in the report instead of one with only the assistant.
+  if (todo.length > 0 && heard === 0) {
+    return "";
+  }
+  const body = lines
     .toSorted((a, b) => a.at - b.at)
-    .map((line) => `[${clock((line.at - origin) / 1000)}] **${line.label}:** ${line.text}`)
-    .join("\n");
+    .map((line) => `[${clock((line.at - origin) / 1000)}] **${line.label}:** ${line.text}`);
+  const missing = failed + jobs.length - todo.length;
+  if (missing > 0) {
+    body.push(`_${missing} utterance(s) could not be transcribed._`);
+  }
+  return body.join("\n");
 }

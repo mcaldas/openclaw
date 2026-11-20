@@ -33,6 +33,10 @@ export type RoomParticipantInput = {
   timeoutSeconds?: number;
   /** Record this leg, one side per channel. */
   record?: boolean;
+  /** Report whether a person or a voicemail answered, to the status callback with check=voicemail. */
+  detectVoicemail?: boolean;
+  /** Hard cap on the leg, so it cannot outlive a crashed gateway for long. */
+  timeLimitSeconds?: number;
 };
 
 /** Conference rooms: the call's legs meet in a room, so keys, a third person and hand-over work. */

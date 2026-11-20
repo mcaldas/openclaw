@@ -95,11 +95,24 @@ describe("createHoldGate", () => {
     expect(gate.mode).toBe("live");
   });
 
-  it("release forgets a hold, and odd frame sizes still classify", () => {
+  it("can be switched off while the owner is on the line, and odd frame sizes still classify", () => {
     const { events, gate } = setup();
     feed(gate, music(12_000), 97);
     expect(gate.mode).toBe("hold");
-    gate.release();
+    gate.setEnabled(false);
+    expect(gate.mode).toBe("live");
+    const audio = music(20_000);
+    expect(Buffer.concat(feed(gate, audio)).equals(audio)).toBe(true);
+    expect(events).toEqual(["hold", "release"]);
+    gate.setEnabled(true);
+    feed(gate, music(12_000));
+    expect(events).toEqual(["hold", "release", "hold"]);
+  });
+
+  it("wakes from a hold when the assistant speaks", () => {
+    const { events, gate } = setup();
+    feed(gate, music(12_000));
+    gate.noteAssistantSpeech();
     expect(gate.mode).toBe("live");
     expect(events).toEqual(["hold", "release"]);
   });

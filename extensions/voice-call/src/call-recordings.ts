@@ -73,6 +73,7 @@ export function createCallRecordings(params: {
   const sleep = params.sleep ?? defaultSleep;
   const now = params.now ?? Date.now;
   const started = new Map<string, Promise<string | undefined>>();
+  const startedAt = new Map<string, number>();
   const finished = new Map<string, Promise<CallRecordingOutcome | undefined>>();
 
   const start = (call: CallRecord, providerCallId: string) => {
@@ -80,6 +81,7 @@ export function createCallRecordings(params: {
       call.callId,
       api.start(providerCallId).then(
         async ({ id }) => {
+          startedAt.set(call.callId, now());
           log.info(`[voice-call] Recording started callId=${call.callId} recording=${id}`);
           await params
             .persist(call, { status: "recording", paths: [], at: now() })
@@ -118,71 +120,77 @@ export function createCallRecordings(params: {
     }
   };
 
+  type Found = Awaited<ReturnType<CallRecordingApi["list"]>>;
+
   const save = async (call: CallRecord, providerCallId: string): Promise<CallRecordingOutcome> => {
     const startError = await started.get(call.callId);
-    let recordings: Awaited<ReturnType<CallRecordingApi["list"]>>;
+    const errors: string[] = [];
+    const sources: { found: Found; leg: "callee" | "owner"; startedAt: number }[] = [];
     try {
       // A start whose response was lost may still have made a recording; only an empty list proves none.
       if (startError && (await api.list(providerCallId)).length === 0) {
-        return { status: "failed", paths: [], error: `start failed: ${startError}`, at: now() };
+        errors.push(`start failed: ${startError}`);
+      } else {
+        sources.push({
+          found: await waitUntilReady(providerCallId),
+          leg: "callee",
+          // The file's second 0 is when recording started, not when the callee answered.
+          startedAt: startedAt.get(call.callId) ?? call.answeredAt ?? call.startedAt,
+        });
       }
-      recordings = await waitUntilReady(providerCallId);
     } catch (error) {
-      const message = formatErrorMessage(error);
       const prefix = startError ? `start failed: ${startError}; ` : "";
-      return { status: "failed", paths: [], error: `${prefix}${message}`, at: now() };
+      errors.push(`${prefix}${formatErrorMessage(error)}`);
+    }
+    // A room call also recorded every owner leg that answered, even if the callee's failed.
+    const room = roomOf(call);
+    for (const leg of room?.ownerLegs ?? []) {
+      try {
+        sources.push({
+          found: await waitUntilReady(leg.callSid),
+          leg: "owner",
+          startedAt: leg.answeredAt,
+        });
+      } catch (error) {
+        errors.push(`owner leg ${leg.callSid}: ${formatErrorMessage(error)}`);
+      }
+    }
+    if (sources.length === 0) {
+      return { status: "failed", paths: [], error: errors.join("; "), at: now() };
     }
     await fs.mkdir(params.dir, { recursive: true, mode: 0o700 });
     const date = new Date(call.startedAt).toISOString().slice(0, 10);
     const paths: string[] = [];
     const legs: NonNullable<CallRecordingOutcome["legs"]> = [];
     const kept: string[] = [];
-    const errors: string[] = [];
-    // A room call also recorded the owner's leg, once the owner answered.
-    const room = roomOf(call);
-    const owner =
-      room?.ownerCallSid && room.ownerAnsweredAt
-        ? await waitUntilReady(room.ownerCallSid).then(
-            (found) => ({ found, startedAt: room.ownerAnsweredAt ?? 0 }),
-            (error: unknown) => {
-              errors.push(`owner leg: ${formatErrorMessage(error)}`);
-              return undefined;
-            },
-          )
-        : undefined;
-    const files = [
-      ...recordings.map((recording, index) => ({
-        recording,
-        leg: "callee" as const,
-        name: `${date}-${call.callId}${index === 0 ? "" : `-${index + 1}`}.wav`,
-        startedAt: call.answeredAt ?? call.startedAt,
-      })),
-      ...(owner?.found ?? []).map((recording, index) => ({
-        recording,
-        leg: "owner" as const,
-        name: `${date}-${call.callId}-owner${index === 0 ? "" : `-${index + 1}`}.wav`,
-        startedAt: owner?.startedAt ?? 0,
-      })),
-    ];
-    for (const { recording, leg, name, startedAt } of files) {
-      const file = path.join(params.dir, name);
-      try {
-        // wx: never overwrite an earlier call's file.
-        await fs.writeFile(file, await api.download(recording.id), { mode: 0o600, flag: "wx" });
-        paths.push(file);
-        legs.push({ leg, path: file, startedAt });
-      } catch (error) {
-        kept.push(recording.id);
-        errors.push(`${recording.id}: ${formatErrorMessage(error)}`);
-        continue;
-      }
-      try {
-        await api.delete(recording.id);
-      } catch (error) {
-        kept.push(recording.id);
-        log.warn(
-          `[voice-call] Recording saved but not deleted at the provider callId=${call.callId} recording=${recording.id}: ${formatErrorMessage(error)}`,
-        );
+    const taken = new Set<string>();
+    for (const { found, leg, startedAt: legStartedAt } of sources) {
+      for (const recording of found) {
+        const base = `${date}-${call.callId}${leg === "owner" ? "-owner" : ""}`;
+        let name = `${base}.wav`;
+        for (let index = 2; taken.has(name); index += 1) {
+          name = `${base}-${index}.wav`;
+        }
+        taken.add(name);
+        const file = path.join(params.dir, name);
+        try {
+          // wx: never overwrite an earlier call's file.
+          await fs.writeFile(file, await api.download(recording.id), { mode: 0o600, flag: "wx" });
+          paths.push(file);
+          legs.push({ leg, path: file, startedAt: legStartedAt });
+        } catch (error) {
+          kept.push(recording.id);
+          errors.push(`${recording.id}: ${formatErrorMessage(error)}`);
+          continue;
+        }
+        try {
+          await api.delete(recording.id);
+        } catch (error) {
+          kept.push(recording.id);
+          log.warn(
+            `[voice-call] Recording saved but not deleted at the provider callId=${call.callId} recording=${recording.id}: ${formatErrorMessage(error)}`,
+          );
+        }
       }
     }
     const transcriptPath =
@@ -199,7 +207,9 @@ export function createCallRecordings(params: {
       paths,
       ...(room ? { legs } : {}),
       ...(transcriptPath ? { transcriptPath } : {}),
-      durationSeconds: recordings.reduce((sum, recording) => sum + recording.durationSeconds, 0),
+      durationSeconds: sources
+        .flatMap((source) => source.found)
+        .reduce((sum, recording) => sum + recording.durationSeconds, 0),
       ...(kept.length > 0 ? { keptAtProvider: kept } : {}),
       ...(errors.length > 0 ? { error: errors.join("; ") } : {}),
       at: now(),
@@ -227,6 +237,7 @@ export function createCallRecordings(params: {
       }))
       .then(async (outcome) => {
         started.delete(call.callId);
+        startedAt.delete(call.callId);
         const detail = `callId=${call.callId} paths=${outcome.paths.join(",") || "none"}${outcome.keptAtProvider ? ` keptAtProvider=${outcome.keptAtProvider.join(",")}` : ""}`;
         if (outcome.status === "saved") {
           log.info(`[voice-call] Recording saved ${detail}`);

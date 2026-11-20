@@ -7,7 +7,7 @@ import type { VoiceCallConfig } from "./config.js";
 import type { CallManager } from "./manager.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import { REALTIME_VOICE_ADD_OWNER_TOOL_NAME } from "./realtime-call-control.js";
-import { createCallRooms, type CallRooms } from "./room.js";
+import { createCallRooms, roomOf, type CallRooms } from "./room.js";
 import { buildSpeakerTranscript, SPEAKER_TRANSCRIPT_PROMPT } from "./speaker-transcript.js";
 import type { CallRecord } from "./types.js";
 import type { VoiceCallWebhookServer } from "./webhook.js";
@@ -47,7 +47,7 @@ export function wireCallRooms(params: {
         params.log.warn(`[voice-call] room note not delivered callId=${callId}: ${result.error}`);
       }
     },
-    releaseHold: (callId) => roomHoldGates.get(callId)?.release(),
+    allowHold: (callId, allowed) => roomHoldGates.get(callId)?.setEnabled(allowed),
     recordOwner: (call) => config.recording.enabled && recordingWanted(call),
     log: (message) => params.log.info(`[voice-call] ${message}`),
   });
@@ -79,8 +79,8 @@ export function createRecordingTranscriber(params: {
     call: CallRecord,
     legs: NonNullable<CallRecordingOutcome["legs"]>,
   ): Promise<string | undefined> => {
-    // shortcut: channel 0 is the far end on outbound legs (measured); inbound layout is unmeasured.
-    if (call.direction !== "outbound") {
+    // Room calls only: Mathias asked for these, and channel 0 is the far end on their legs.
+    if (!roomOf(call)) {
       return undefined;
     }
     const ownerName = params.config.room?.ownerName ?? "Owner";

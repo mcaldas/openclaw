@@ -225,7 +225,14 @@ export async function initiateCall(
       inlineTwiml,
       preConnectTwiml,
       ...(ctx.config.voicemail?.detection === "twilio" ? { voicemail: ctx.config.voicemail } : {}),
-      ...(room ? { room } : {}),
+      // The leg no longer ends with Jarvis's stream: cap it in case the gateway dies mid-call.
+      ...(room
+        ? {
+            room,
+            timeLimitSeconds:
+              Math.min(brief?.maxDurationSeconds ?? Infinity, ctx.config.maxDurationSeconds) + 120,
+          }
+        : {}),
       ...(streamSession
         ? { streamUrl: streamSession.streamUrl, streamAuthToken: streamSession.token }
         : {}),
@@ -649,7 +656,8 @@ export function endCall(
   const operation = (async (): Promise<CallEndResult> => {
     try {
       // Hand-over: with the owner in the room only Jarvis leaves; the callee's hang-up ends the call.
-      if (ctx.room && roomOf(call) && (await ctx.room.handOver(call))) {
+      // The max-duration limit still ends every leg.
+      if (reason !== "timeout" && ctx.room && roomOf(call) && (await ctx.room.handOver(call))) {
         return { success: true };
       }
       await provider.hangupCall({

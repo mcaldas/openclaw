@@ -24,6 +24,18 @@ const ROOM_LEG = {
   EarlyMedia: "false",
 };
 
+/** Human or voicemail, decided within 5 s of the answer; "unknown" counts as a person. */
+function voicemailCheck(statusCallback: string): Record<string, string> {
+  const url = new URL(statusCallback);
+  url.searchParams.set("check", "voicemail");
+  return {
+    MachineDetection: "Enable",
+    MachineDetectionTimeout: "5",
+    AmdStatusCallback: url.toString(),
+    AmdStatusCallbackMethod: "POST",
+  };
+}
+
 /** Twilio's <Play digits> knows digits, * # and w (0.5 s pause). */
 export function toTwilioKeys(digits: string): string {
   return digits.replace(/[pP,]/g, "w").replace(/W/g, "ww");
@@ -53,7 +65,9 @@ export function createTwilioRoomApi(params: {
         StatusCallback: input.statusCallback,
         StatusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
         Timeout: String(input.timeoutSeconds ?? 30),
+        ...(input.timeLimitSeconds ? { TimeLimit: String(input.timeLimitSeconds) } : {}),
         ...(input.record ? { Record: "true", RecordingChannels: "dual" } : {}),
+        ...(input.detectVoicemail ? voicemailCheck(input.statusCallback) : {}),
       }),
     pressKeys: (callSid, room, digits) =>
       params.updateTwiml(callSid, generateRoomTwiml(room, toTwilioKeys(digits))),
