@@ -110,6 +110,10 @@ describe("createRoomHoldGate", () => {
     expect(room.gate.mode).toBe("hold");
     fail?.(new Error("onnx"));
     expect(room.gate.mode).toBe("live");
+    // The room turns holding back on when the owner leaves; a dead detector stays off.
+    room.gate.setEnabled(true);
+    room.gate.holdNow();
+    expect(room.gate.mode).toBe("live");
     const audio = Buffer.alloc(160, 0x10);
     expect(room.gate.accept(audio)).toBe(audio);
   });

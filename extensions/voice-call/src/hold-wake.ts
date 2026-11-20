@@ -131,9 +131,11 @@ export function createRoomHoldGate(
     ? createAnnouncementMemory((audio) => transcribeMulaw(audio, transcribe), log)
     : undefined;
   // Inference errors arrive asynchronously, after the gate below exists.
+  let failed = false;
   const probs = createSileroProbSource(vad, (error) => {
     // A broken detector must not leave the model deaf: hand it the whole line instead.
     log(`Silero VAD failed (${String(error)}); hold gate off for this call`);
+    failed = true;
     gate.setEnabled(false);
   });
   const gate = createHoldGate(
@@ -147,5 +149,8 @@ export function createRoomHoldGate(
     },
     { speechProbs: probs, holdFeed: "none", checkWake: memory?.check },
   );
+  // The room re-enables the gate when the owner leaves; a dead detector must stay off.
+  const setEnabled = gate.setEnabled.bind(gate);
+  gate.setEnabled = (on) => setEnabled(on && !failed);
   return { gate, detector: "silero" as const, close: () => probs.close() };
 }

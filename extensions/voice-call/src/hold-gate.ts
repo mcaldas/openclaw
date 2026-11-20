@@ -137,8 +137,10 @@ export function createHoldGate(
   let graceFrames = 0;
   /** A wake waiting for checkWake: frames heard since, and how long it has waited. */
   let checking: { audio: Buffer[]; waited: number; verdict?: "wake" | "repeat" } | undefined;
-  /** After a repeat, the rest of that announcement must not start another check. */
+  /** After a repeat, the rest of that announcement must not start another check... */
   let ignoreSpeech = false;
+  /** ...for at most 6 s, about one announcement: longer speech gets a fresh check (a person?). */
+  let ignoredHops = 0;
   let checkGeneration = 0;
 
   const resetRuns = () => {
@@ -158,6 +160,7 @@ export function createHoldGate(
   const wake = (audio: Buffer) => {
     wokeWith = audio;
     ignoreSpeech = false;
+    graceFrames = 0;
     enter("probe", "speech");
   };
   const startCheck = (check: WakeCheck, preroll: Buffer) => {
@@ -184,6 +187,7 @@ export function createHoldGate(
     checking = undefined;
     if (verdict === "repeat") {
       ignoreSpeech = true;
+      ignoredHops = 0;
       speechRun = 0;
       onEvent("repeat");
       return;
@@ -225,13 +229,14 @@ export function createHoldGate(
     speechRun = kind === "speech" ? speechRun + 1 : 0;
     musicRun = holdsLine ? musicRun + 1 : 0;
     quietRun = kind === "speech" ? 0 : quietRun + 1;
-    if (ignoreSpeech && quietRun >= 2) {
+    if (ignoreSpeech && (quietRun >= 2 || ++ignoredHops >= 12)) {
       ignoreSpeech = false;
     }
     if (mode === "live" && musicRun >= holdHops) {
       enter("hold", "hold");
     } else if (mode === "hold" && speechRun >= speechHops && !checking && !ignoreSpeech) {
-      const preroll = Buffer.concat(frames);
+      // Only what the model did not hear: a hold the model asked for began moments ago.
+      const preroll = Buffer.concat(frames.slice(-heldFrames));
       if (options.checkWake) {
         startCheck(options.checkWake, preroll);
       } else {

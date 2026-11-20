@@ -44,6 +44,7 @@
       "openclawVersion": "2026.11.5-beta.1"
     },
     "release": {
+      "bundleRuntimeDependencies": false,
       "publishToClawHub": true,
       "publishToNpm": true
     }

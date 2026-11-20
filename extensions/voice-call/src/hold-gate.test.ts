@@ -175,7 +175,7 @@ describe("createHoldGate with Silero probabilities", () => {
 
   it("wakes within a second of speech and replays the held-back audio", () => {
     const { events, gate, say } = sileroGate();
-    feed(gate, music(12_000));
+    feed(gate, music(15_000));
     const woke = say(1_000);
     expect(events).toEqual(["hold", "speech"]);
     expect(gate.mode).toBe("probe");
@@ -191,7 +191,7 @@ describe("createHoldGate with Silero probabilities", () => {
       },
     });
     feed(gate, music(12_000));
-    const during = await sayLive(6_000);
+    const during = await sayLive(4_000);
     expect(checks).toHaveLength(1);
     expect(events).toEqual(["hold", "repeat"]);
     expect(gate.mode).toBe("hold");
@@ -210,7 +210,7 @@ describe("createHoldGate with Silero probabilities", () => {
           answer = resolve;
         }),
     });
-    feed(gate, music(12_000));
+    feed(gate, music(15_000));
     say(1_000);
     expect(events).toEqual(["hold"]);
     answer?.("wake");
@@ -223,6 +223,33 @@ describe("createHoldGate with Silero probabilities", () => {
     feed(slow.gate, music(12_000));
     slow.say(4_000);
     expect(slow.events).toEqual(["hold", "speech"]);
+  });
+
+  it("re-checks speech that runs on after a repeat, so a person cannot be ignored", async () => {
+    const checks: string[] = [];
+    const { events, gate, sayLive } = sileroGate({
+      checkWake: async () => {
+        checks.push("check");
+        return checks.length === 1 ? "repeat" : "wake";
+      },
+    });
+    feed(gate, music(15_000));
+    await sayLive(9_000);
+    expect(checks).toHaveLength(2);
+    expect(events).toEqual(["hold", "repeat", "speech"]);
+  });
+
+  it("replays only what the model missed after a hold it asked for", () => {
+    const { events, gate, say } = sileroGate();
+    feed(gate, music(3_000));
+    gate.holdNow();
+    const woke = say(1_000);
+    expect(events).toEqual(["hold", "speech"]);
+    const replay = woke.find((frame) => frame.length > 160);
+    expect(replay?.length).toBeLessThan(RATE);
+    // The grace for the tool's reply ends with the wake: the assistant's speech now counts.
+    gate.noteAssistantSpeech();
+    expect(gate.mode).toBe("live");
   });
 
   it("holds at once when the model says so, and its reply does not end the hold", () => {
