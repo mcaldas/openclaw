@@ -243,13 +243,36 @@ describe("createHoldGate with Silero probabilities", () => {
     const { events, gate, say } = sileroGate();
     feed(gate, music(3_000));
     gate.holdNow();
+    feed(gate, music(1_500));
     const woke = say(1_000);
     expect(events).toEqual(["hold", "speech"]);
     const replay = woke.find((frame) => frame.length > 160);
-    expect(replay?.length).toBeLessThan(RATE);
+    expect(replay?.length).toBeLessThan(3 * RATE);
     // The grace for the tool's reply ends with the wake: the assistant's speech now counts.
     gate.noteAssistantSpeech();
     expect(gate.mode).toBe("live");
+  });
+
+  it("keeps the model's hold call waiting until someone speaks, through the rest of the recording", async () => {
+    const { events, gate, say } = sileroGate();
+    say(2_000); // a recording; the model asks to hold while it still plays
+    gate.holdNow();
+    const ended = gate.whenHoldEnds();
+    let settled: string | undefined;
+    void ended.then((how) => (settled = how));
+    say(3_000); // the rest of the same recording
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+    expect(gate.mode).toBe("hold");
+    feed(gate, music(2_000));
+    say(1_000); // a person, after a pause
+    await expect(ended).resolves.toBe("speech");
+    expect(events).toEqual(["hold", "speech"]);
+    gate.holdNow();
+    const released = gate.whenHoldEnds();
+    gate.setEnabled(false); // the call ends or the owner joins
+    await expect(released).resolves.toBe("release");
+    await expect(gate.whenHoldEnds()).resolves.toBe("release");
   });
 
   it("holds at once when the model says so, and its reply does not end the hold", () => {

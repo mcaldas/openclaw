@@ -124,7 +124,9 @@ export function createRoomHoldGate(
 ) {
   const vad = holdWakeServices.vad;
   if (holdDetectorOf(call) === "energy" || !vad) {
-    return { gate: createHoldGate(onEvent), detector: "energy" as const, close: () => {} };
+    const gate = createHoldGate(onEvent);
+    // Closing releases anyone still waiting on a hold (the model's hold tool call).
+    return { gate, detector: "energy" as const, close: () => gate.setEnabled(false) };
   }
   const transcribe = holdWakeServices.transcribe;
   const memory = transcribe
@@ -152,5 +154,12 @@ export function createRoomHoldGate(
   // The room re-enables the gate when the owner leaves; a dead detector must stay off.
   const setEnabled = gate.setEnabled.bind(gate);
   gate.setEnabled = (on) => setEnabled(on && !failed);
-  return { gate, detector: "silero" as const, close: () => probs.close() };
+  return {
+    gate,
+    detector: "silero" as const,
+    close: () => {
+      probs.close();
+      gate.setEnabled(false);
+    },
+  };
 }

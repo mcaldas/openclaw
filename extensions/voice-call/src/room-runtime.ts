@@ -6,7 +6,11 @@ import { recordingWanted, type CallRecordingOutcome } from "./call-recordings.js
 import type { VoiceCallConfig } from "./config.js";
 import { holdWakeServices, WAKE_TRANSCRIPT_PROMPT } from "./hold-wake.js";
 import type { CallManager } from "./manager.js";
-import { phoneMenuResult, REALTIME_VOICE_PHONE_MENU_TOOL_NAME } from "./phone-menu.js";
+import {
+  phoneMenuHoldEnded,
+  phoneMenuResult,
+  REALTIME_VOICE_PHONE_MENU_TOOL_NAME,
+} from "./phone-menu.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import {
   REALTIME_VOICE_ADD_OWNER_TOOL_NAME,
@@ -75,6 +79,14 @@ export function wireCallRooms(params: {
     params.log.info(`[voice-call] phone menu ${String(status)} callId=${callId}`);
     const gate = roomHoldGates.get(callId);
     modelQuietWindows.get(callId)?.(SILENT_TOOL_QUIET_MS);
+    if (status === "hold" && gate) {
+      gate.holdNow();
+      if (gate.mode === "hold") {
+        const how = await gate.whenHoldEnds();
+        params.log.info(`[voice-call] phone menu hold ended (${how}) callId=${callId}`);
+        return phoneMenuHoldEnded(how);
+      }
+    }
     return phoneMenuResult(
       status,
       gate &&

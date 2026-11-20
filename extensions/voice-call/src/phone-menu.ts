@@ -29,6 +29,21 @@ In a menu: press a key with ${REALTIME_VOICE_SEND_DTMF_TOOL_NAME} only when an o
 On hold: when a recording says you are being transferred or connected ("Please hold while I transfer you", "Connecting you to...", "One moment please" after your last choice), or only hold music and hold messages play, call ${REALTIME_VOICE_PHONE_MENU_TOOL_NAME} with status "hold" and say nothing. You will hear the line again, from the person's first words, when someone speaks; if it is a person, greet them and continue your task.
 Stuck: call ${REALTIME_VOICE_PHONE_MENU_TOOL_NAME} with status "stuck" when you have heard the same menu three times without progress, you keep hearing "invalid selection", or the menu asks for information you do not have. Then press the key for an operator or other inquiries if one was offered; otherwise stay silent and keep listening, since menus repeat or route to a person when nothing is pressed.`;
 
+/**
+ * A "hold" call returns only when the hold ends. Gemini answers every tool result, and an instant
+ * "on hold" result made it call hold again about once a second for a whole 20-minute hold (lab call
+ * 2026-11-20: 760 calls, each a billed turn). Waiting leaves it nothing to answer until the line speaks.
+ */
+export function phoneMenuHoldEnded(how: "speech" | "release") {
+  return {
+    ok: true,
+    note:
+      how === "speech"
+        ? "Someone is speaking on the line now. Listen: if it is a live person, greet them and continue your task; if it is another recording, call openclaw_phone_menu with status hold again and say nothing."
+        : "The line is live again. Listen before you speak.",
+  };
+}
+
 /** What the tool returns; every result makes the model reply, so each one says to stay quiet. */
 export function phoneMenuResult(status: unknown, holdNow: (() => boolean) | undefined) {
   if (status === "hold") {

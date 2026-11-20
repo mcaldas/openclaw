@@ -142,6 +142,15 @@ export function createHoldGate(
   /** ...for at most 6 s, about one announcement: longer speech gets a fresh check (a person?). */
   let ignoredHops = 0;
   let checkGeneration = 0;
+  /** Callers waiting for this hold to end (the model's own "hold" tool call waits here). */
+  let holdWaiters: ((how: "speech" | "release") => void)[] = [];
+  const settleWaiters = (how: "speech" | "release") => {
+    const waiting = holdWaiters;
+    holdWaiters = [];
+    for (const resolve of waiting) {
+      resolve(how);
+    }
+  };
 
   const resetRuns = () => {
     sinceHop = 0;
@@ -150,6 +159,9 @@ export function createHoldGate(
     quietRun = 0;
   };
   const enter = (next: HoldGateMode, event: HoldGateEvent) => {
+    if (mode === "hold" && next !== "hold") {
+      settleWaiters(next === "probe" ? "speech" : "release");
+    }
     mode = next;
     heldFrames = 0;
     checking = undefined;
@@ -249,6 +261,9 @@ export function createHoldGate(
 
   const release = () => {
     const was = mode;
+    if (was === "hold") {
+      settleWaiters("release");
+    }
     mode = "live";
     frames = [];
     levels = [];
@@ -299,6 +314,18 @@ export function createHoldGate(
       if (mode !== "hold") {
         enter("hold", "hold");
       }
+      // The recording that prompted this is still playing: it must not wake the gate again.
+      ignoreSpeech = true;
+      ignoredHops = 0;
+    },
+    /** Resolves when this hold ends: "speech" when someone speaks, "release" otherwise. */
+    whenHoldEnds(): Promise<"speech" | "release"> {
+      if (mode !== "hold") {
+        return Promise.resolve("release");
+      }
+      return new Promise((resolve) => {
+        holdWaiters.push(resolve);
+      });
     },
     /**
      * Returns what the model should hear for this frame: the frame itself, silence of the same
