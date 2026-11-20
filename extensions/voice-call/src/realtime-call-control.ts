@@ -57,6 +57,14 @@ export function buildAddOwnerTool(ownerName: string): RealtimeVoiceTool {
 /** Stable provider-facing tool name for asking which phone leg spoke last in a room call. */
 export const REALTIME_VOICE_WHO_SPOKE_TOOL_NAME = "openclaw_who_spoke";
 
+/**
+ * Room calls: the rule stays in the instructions for every turn, not only in the one-off note
+ * sent when the owner joins (same-voice lab call 2026-11-20: 2 of 3 answers to the right person).
+ */
+export function whoSpokeInstructions(ownerName: string): string {
+  return `Three-way calls: once ${ownerName} has joined, every time you are about to answer, first call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} and answer the person it names. ${ownerName} and the other person may sound exactly alike, so never decide by the voice or by what was said; a question about who they are talking to comes from whoever spoke last.`;
+}
+
 /** Room calls only: who spoke last, by phone line (Twilio speaker events), not by voice. */
 export function buildWhoSpokeTool(ownerName: string): RealtimeVoiceTool {
   return {

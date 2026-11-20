@@ -33,6 +33,7 @@ import { buildRealtimeVoiceInstructions } from "./realtime-agent-context.js";
 import {
   buildAddOwnerTool,
   buildWhoSpokeTool,
+  whoSpokeInstructions,
   REALTIME_VOICE_SEND_DTMF_TOOL_NAME,
   resolveVoiceCallRealtimeTools,
 } from "./realtime-call-control.js";
@@ -301,7 +302,7 @@ export async function createVoiceCallRuntime(params: {
         providerConfig: resolved.providerConfig,
         capabilities: resolved.capabilities,
         instructions: roomOf(call)
-          ? `${resolveRealtimeInstructions(call)}\n\n${PHONE_MENU_INSTRUCTIONS}`
+          ? `${resolveRealtimeInstructions(call)}\n\n${PHONE_MENU_INSTRUCTIONS}\n\n${whoSpokeInstructions(config.room?.ownerName ?? "the owner")}`
           : resolveRealtimeInstructions(call),
       };
     };
