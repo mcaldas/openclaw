@@ -11,6 +11,12 @@ export const CallReportsConfigSchema = z
   .strict()
   .default({ enabled: false, includeTranscript: true });
 
+/** Provider call recordings, saved as two-channel WAV beside the call records. */
+export const CallRecordingConfigSchema = z
+  .object({ enabled: z.boolean().default(false) })
+  .strict()
+  .default({ enabled: false });
+
 export const CallLiveConfigSchema = z
   .object({
     transcript: z.boolean().default(false),

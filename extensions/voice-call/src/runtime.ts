@@ -1,3 +1,4 @@
+import path from "node:path";
 import { listAgentIds } from "openclaw/plugin-sdk/agent-scope-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -15,6 +16,7 @@ import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import type { OpenClawPluginApi } from "../api.js";
 import { buildCallBriefInstructions } from "./call-brief.js";
 import { createCallDeliveryRuntime } from "./call-delivery-runtime.js";
+import { createCallRecordings } from "./call-recordings.js";
 import type { VoiceCallConfig } from "./config.js";
 import {
   resolveVoiceCallEffectiveConfig,
@@ -398,11 +400,9 @@ export async function createVoiceCallRuntime(params: {
         if (typeof digits !== "string" || !digits) {
           return { error: "digits is required" };
         }
-        const played = await realtimeHandler.playKeypadTones(callId, digits);
-        if (!played) {
-          return { error: "This call has no live audio stream for keypad tones" };
-        }
-        return { success: true, digits, playoutConfirmed: played.confirmed };
+        // In-band only: the provider fallback would replace the TwiML and end this stream.
+        const result = await manager.sendDtmf(callId, digits, { inBandOnly: true });
+        return result.success ? { success: true, digits } : { error: result.error };
       },
     );
     manager.playRealtimeKeypadTones = (callId, digits) =>
@@ -415,6 +415,20 @@ export async function createVoiceCallRuntime(params: {
     }
     webhookServer.setRealtimeHandler(realtimeHandler);
   }
+  const recordingApi = config.recording.enabled ? provider.recordings : undefined;
+  if (config.recording.enabled && !recordingApi) {
+    log.warn(`[voice-call] ${provider.name} calls cannot be recorded; recording stays off.`);
+  }
+  const recordings = recordingApi
+    ? createCallRecordings({
+        api: recordingApi,
+        dir: path.join(manager.storePath, "recordings"),
+        persist: (call, outcome) =>
+          // Only the recording key: the stored record keeps its newer delivery statuses.
+          manager.persistDeliveryStatus({ ...call, metadata: { recording: outcome } }),
+        log,
+      })
+    : undefined;
   const delivery =
     (config.reports.enabled || config.live.transcript) &&
     params.deliveryRuntime &&
@@ -426,8 +440,16 @@ export async function createVoiceCallRuntime(params: {
           runInServiceContext: params.runInServiceContext,
           manager,
           logger: log,
+          recordingFor: recordings?.finish,
         })
       : undefined;
+  if (recordings) {
+    const deliverCallUpdate = manager.onCallUpdated;
+    manager.onCallUpdated = (call) => {
+      recordings.observe(call);
+      return deliverCallUpdate?.(call);
+    };
+  }
   if ((config.reports.enabled || config.live.transcript) && !delivery) {
     log.warn(
       "[voice-call] Reports/live transcript require the plugin delivery runtime; transcripts remain in call history.",

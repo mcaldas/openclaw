@@ -328,13 +328,14 @@ it("sends DTMF through connected provider calls", async () => {
 
 it("plays DTMF in-band on a live realtime stream instead of replacing its TwiML", async () => {
   const sendDtmfProvider = vi.fn(async () => {});
-  const { ctx } = connected({ name: "telnyx", sendDtmf: sendDtmfProvider });
+  const { ctx, call } = connected({ name: "telnyx", sendDtmf: sendDtmfProvider });
   const playRealtimeKeypadTones = vi.fn(async () => ({ durationMs: 720, confirmed: true }));
   Object.assign(ctx, { playRealtimeKeypadTones });
 
   expect(await sendDtmf(ctx as never, "call-1", "1A#")).toEqual({ success: true });
   expect(playRealtimeKeypadTones).toHaveBeenCalledWith("call-1", "1A#");
   expect(sendDtmfProvider).not.toHaveBeenCalled();
+  expect(call.transcript.at(-1)).toMatchObject({ speaker: "bot", text: "[pressed 1A#]" });
 
   playRealtimeKeypadTones.mockRejectedValueOnce(new Error("Realtime call stream is closed"));
   await expectFailure(sendDtmf(ctx as never, "call-1", "1"), "Realtime call stream is closed");
@@ -346,6 +347,12 @@ it("keeps the provider DTMF path when no realtime stream owns the call", async (
   Object.assign(ctx, { playRealtimeKeypadTones: vi.fn(() => undefined) });
 
   expect(await sendDtmf(ctx as never, "call-1", "9")).toEqual({ success: true });
+  expect(sendDtmfProvider).toHaveBeenCalledOnce();
+  // The realtime tool must never fall back: replacing the TwiML would end its own stream.
+  await expectFailure(
+    sendDtmf(ctx as never, "call-1", "9", { inBandOnly: true }),
+    "This call has no live audio stream for keypad tones",
+  );
   expect(sendDtmfProvider).toHaveBeenCalledOnce();
 });
 

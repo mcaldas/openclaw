@@ -19,6 +19,7 @@ import { normalizePhoneNumber } from "./allowlist.js";
 import {
   CallCallbacksConfigSchema,
   CallLiveConfigSchema,
+  CallRecordingConfigSchema,
   CallReportsConfigSchema,
   CallVoicemailConfigSchema,
 } from "./errand-config.js";
@@ -292,6 +293,7 @@ const VoiceCallConfigSchema = z
 
     reports: CallReportsConfigSchema,
     live: CallLiveConfigSchema,
+    recording: CallRecordingConfigSchema,
     callbacks: CallCallbacksConfigSchema,
     voicemail: CallVoicemailConfigSchema,
 

@@ -342,16 +342,33 @@ export async function sendDtmf(
   ctx: CallManagerContext,
   callId: CallId,
   digits: string,
+  options?: { inBandOnly?: boolean },
 ): Promise<{ success: boolean; error?: string }> {
+  // Keys are not speech, so without this line the transcript would not show them.
+  const notePressed = async (call: CallRecord) => {
+    // The keys are already sent: a failed transcript write must not invite a retry.
+    await updateCall(ctx, call, (next) =>
+      addTranscriptEntry(next, "bot", `[pressed ${digits}]`),
+    ).catch((err: unknown) => {
+      console.warn(
+        `[voice-call] Pressed keys not added to the transcript: ${formatErrorMessage(err)}`,
+      );
+    });
+    return { success: true };
+  };
   // A live realtime stream takes in-band tones: replacing its TwiML would end the stream.
-  if (lookupConnectedCall(ctx, callId).kind === "ok") {
+  const live = lookupConnectedCall(ctx, callId);
+  if (live.kind === "ok") {
     try {
       if (await ctx.playRealtimeKeypadTones?.(callId, digits)) {
-        return { success: true };
+        return await notePressed(live.call);
       }
     } catch (err) {
       return { success: false, error: formatErrorMessage(err) };
     }
+  }
+  if (options?.inBandOnly) {
+    return { success: false, error: "This call has no live audio stream for keypad tones" };
   }
   const validationError = validateDtmfDigits(digits);
   if (validationError) {
@@ -371,7 +388,7 @@ export async function sendDtmf(
       providerCallId: connected.providerCallId,
       digits,
     });
-    return { success: true };
+    return await notePressed(connected.call);
   } catch (err) {
     return { success: false, error: formatErrorMessage(err) };
   }

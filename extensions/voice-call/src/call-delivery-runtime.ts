@@ -9,6 +9,7 @@ import {
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { appendSessionTranscriptMessageByIdentityStrict } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
+import type { CallRecordingOutcome } from "./call-recordings.js";
 import type { VoiceCallConfig } from "./config.js";
 import type { CallManager } from "./manager.js";
 import { copyCallRecord } from "./manager/state.js";
@@ -60,7 +61,12 @@ function formatCallTranscript(entries: readonly TranscriptEntry[]): string {
     .join("\n");
 }
 
-function formatReport(call: CallRecord, summary: string, includeTranscript: boolean): string {
+function formatReport(
+  call: CallRecord,
+  summary: string,
+  includeTranscript: boolean,
+  recording?: CallRecordingOutcome,
+): string {
   const duration = Math.max(0, Math.round(((call.endedAt ?? Date.now()) - call.startedAt) / 1000));
   const lines = [
     `Voice call ${call.callId}`,
@@ -80,6 +86,15 @@ function formatReport(call: CallRecord, summary: string, includeTranscript: bool
     if (typeof value === "string") {
       lines.push(`${label}: ${value}`);
     }
+  }
+  for (const file of recording?.paths ?? []) {
+    lines.push(`Recording: ${file}`);
+  }
+  if (recording?.status === "failed") {
+    const kept = recording.keptAtProvider?.join(", ");
+    lines.push(
+      `Recording problem: ${recording.error}${kept ? ` (kept at provider: ${kept})` : ""}`,
+    );
   }
   if (includeTranscript) {
     lines.push(
@@ -127,8 +142,19 @@ export function createCallDeliveryRuntime(params: {
   manager: CallManager;
   runInServiceContext: <T>(run: () => T) => T;
   logger: PluginLogger;
+  /** Resolves once the call's recording is saved or has failed; undefined when not recorded. */
+  recordingFor?: (call: CallRecord) => Promise<CallRecordingOutcome | undefined>;
 }): { observe: (call: CallRecord) => Promise<void>; stop: () => Promise<void> } {
   const abort = new AbortController();
+  // Stop does not wait for a slow recording: the save goes on and stores its own outcome.
+  const unlessStopped = <T>(work: Promise<T> | undefined): Promise<T | undefined> =>
+    new Promise((resolve, reject) => {
+      const onAbort = () => resolve(undefined);
+      abort.signal.addEventListener("abort", onAbort, { once: true });
+      void Promise.resolve(work)
+        .then(resolve, reject)
+        .finally(() => abort.signal.removeEventListener("abort", onAbort));
+    });
   const assertActive = () => abort.signal.throwIfAborted();
   const describeRequester = async (sessionKey: string) => {
     const description = await params.runtime.gateway.request<SessionDeliveryDescription>(
@@ -354,9 +380,12 @@ export function createCallDeliveryRuntime(params: {
         onDeliveryError(error);
       }
       assertDeliveryActive();
+      // Recordings settle shortly after hang-up, so the report can carry the file path.
+      const recording = await unlessStopped(params.recordingFor?.(call));
+      assertDeliveryActive();
       await deliver({
         sessionKey,
-        text: formatReport(call, summary, params.config.reports.includeTranscript),
+        text: formatReport(call, summary, params.config.reports.includeTranscript, recording),
         idempotencyKey: `voice-call:${call.callId}:report`,
       });
       await saveStatus(call, "callReport", {

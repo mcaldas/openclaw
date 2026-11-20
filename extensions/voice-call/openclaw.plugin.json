@@ -502,6 +502,17 @@
           }
         }
       },
+      "recording": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Record calls at the provider (two channels) and save them beside the call records.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
       "callbacks": {
         "type": "object",
         "additionalProperties": false,

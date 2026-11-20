@@ -17,6 +17,7 @@ export function createVoiceCallBaseConfig(params?: {
     outbound: { defaultMode: "notify", notifyHangupDelaySec: 3 },
     reports: { enabled: false, includeTranscript: true },
     live: { transcript: false, minIntervalMs: 5000 },
+    recording: { enabled: false },
     callbacks: { enabled: false, windowMinutes: 60 },
     voicemail: CallVoicemailConfigSchema.parse({}),
     maxDurationSeconds: 300,

@@ -23,6 +23,8 @@ export const CallBriefSchema = z
     voicemailMessage: text(1000).optional(),
     successCriteria: text(1000).optional(),
     maxDurationSeconds: z.number().int().positive().optional(),
+    /** false places this call without a recording when recording is on. */
+    record: z.boolean().optional(),
   })
   .strict()
   .refine((brief) => JSON.stringify(brief).length <= 8000, "Call brief exceeds 8000 characters");

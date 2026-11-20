@@ -25,10 +25,15 @@ import type {
 } from "../types.js";
 import { escapeXml, mapVoiceToPolly } from "../voice-mapping.js";
 import { verifyTwilioWebhook } from "../webhook-security.js";
-import { assertVoiceCallProviderSetting, type VoiceCallProvider } from "./base.js";
+import {
+  assertVoiceCallProviderSetting,
+  type CallRecordingApi,
+  type VoiceCallProvider,
+} from "./base.js";
 import { mapProviderStatusToEndReason, normalizeProviderStatus } from "./shared/call-status.js";
 import { resolveTwilioApiBaseUrl, type TwilioRegion } from "./twilio-region.js";
 import { TwilioApiError, createTwilioApi } from "./twilio/api.js";
+import { createTwilioRecordingApi } from "./twilio/recordings.js";
 
 export interface TwilioProviderOptions {
   /** Allow ngrok free tier compatibility mode (loopback only, less secure) */
@@ -79,6 +84,7 @@ export class TwilioProvider implements VoiceCallProvider {
   private readonly authToken: string;
   private readonly apiRequest: ReturnType<typeof createTwilioApi>["request"];
   readonly getCallStatus: VoiceCallProvider["getCallStatus"];
+  readonly recordings: CallRecordingApi;
   private readonly callWebhookUrls = new Map<string, string>();
   private readonly options: TwilioProviderOptions;
 
@@ -127,6 +133,10 @@ export class TwilioProvider implements VoiceCallProvider {
     });
     this.apiRequest = api.request;
     this.getCallStatus = api.getCallStatus;
+    this.recordings = createTwilioRecordingApi({
+      baseUrl: resolveTwilioApiBaseUrl({ accountSid: config.accountSid, region: config.region }),
+      authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64")}`,
+    });
     this.options = options;
 
     if (options.publicUrl) {

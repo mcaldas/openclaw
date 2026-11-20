@@ -24,6 +24,9 @@ const VoiceCallBriefToolSchema = Type.Object(
     voicemailMessage: Type.Optional(Type.String({ maxLength: 1000 })),
     successCriteria: Type.Optional(Type.String({ maxLength: 1000 })),
     maxDurationSeconds: Type.Optional(Type.Integer({ minimum: 1 })),
+    record: Type.Optional(
+      Type.Boolean({ description: "false places this call without a recording" }),
+    ),
   },
   { additionalProperties: false },
 );

@@ -22,6 +22,7 @@ function createDelivery(
   config: ReturnType<typeof normalizeVoiceCallConfig>,
   messages: CallDeliveryMessage[],
   beforeDeliver?: () => Promise<void>,
+  recordingFor?: Parameters<typeof createCallDeliveryRuntime>[0]["recordingFor"],
 ) {
   const runtime = createPluginRuntimeMock();
   vi.spyOn(runtime.gateway, "request").mockImplementation(async (method, params) => {
@@ -57,6 +58,7 @@ function createDelivery(
     manager,
     runInServiceContext: (run) => run(),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    recordingFor,
   });
 }
 
@@ -124,6 +126,47 @@ describe("requester call delivery", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     return setup({ live: { transcript: true, minIntervalMs: 1000 } });
   }
+
+  it("waits for the recording and names its file, or the problem, in the report", async () => {
+    const { manager, call, config } = await setup();
+    const messages: CallDeliveryMessage[] = [];
+    const delivery = createDelivery(manager, config, messages, undefined, async () => ({
+      status: "failed",
+      paths: ["/calls/recordings/2026-11-20-call.wav"],
+      keptAtProvider: ["RE2"],
+      error: "RE2: HTTP 503",
+      at: 1,
+    }));
+    await finish(manager, call, delivery);
+
+    expect(messages[0]?.text).toContain("Recording: /calls/recordings/2026-11-20-call.wav");
+    expect(messages[0]?.text).toContain("Recording problem: RE2: HTTP 503 (kept at provider: RE2)");
+  });
+
+  it("does not hold up stop while a recording is still settling", async () => {
+    const { manager, call, config } = await setup();
+    const messages: CallDeliveryMessage[] = [];
+    const delivery = createDelivery(
+      manager,
+      config,
+      messages,
+      undefined,
+      () => new Promise(() => {}),
+    );
+    await end(manager, call);
+    const observed = delivery.observe(call);
+    await vi.waitFor(async () =>
+      expect(
+        (await manager.getCallFromMemoryOrStore(call.callId))?.metadata?.callReport,
+      ).toMatchObject({ status: "pending" }),
+    );
+    await delivery.stop();
+    await observed;
+
+    expect(messages).toHaveLength(0);
+    const saved = await manager.getCallFromMemoryOrStore(call.callId);
+    expect(saved?.metadata?.callReport).toMatchObject({ status: "failed" });
+  });
 
   it.each([true, false])(
     "reports once with includeTranscript=%s and persists delivery status",

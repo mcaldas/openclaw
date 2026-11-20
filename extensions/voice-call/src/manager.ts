@@ -51,7 +51,7 @@ export class CallManager {
   private processedEventIds = new Set<string>();
   private rejectedProviderCallIds = new Set<string>();
   private provider: VoiceCallProvider | null = null;
-  private storePath: string;
+  readonly storePath: string;
   private webhookUrl: string | null = null;
   private activeTurnCalls = new Set<CallId>();
   private endCallOperations = new Map<CallId, Promise<CallEndResult>>();
@@ -180,7 +180,7 @@ export class CallManager {
       }
       const next = copyCallRecord(current);
       next.metadata = { ...next.metadata };
-      for (const key of ["callReport", "liveTranscriptDelivery"]) {
+      for (const key of ["callReport", "liveTranscriptDelivery", "recording"]) {
         if (snapshot.metadata?.[key] !== undefined) {
           next.metadata[key] = snapshot.metadata[key];
         }
@@ -464,8 +464,12 @@ export class CallManager {
     return this.runOperation(() => speakWithContext(this.getContext(), callId, text, options));
   }
 
-  async sendDtmf(callId: CallId, digits: string): Promise<{ success: boolean; error?: string }> {
-    return this.runOperation(() => sendDtmfWithContext(this.getContext(), callId, digits));
+  async sendDtmf(
+    callId: CallId,
+    digits: string,
+    options?: { inBandOnly?: boolean },
+  ): Promise<{ success: boolean; error?: string }> {
+    return this.runOperation(() => sendDtmfWithContext(this.getContext(), callId, digits, options));
   }
 
   async speakInitialMessage(providerCallId: string): Promise<void> {

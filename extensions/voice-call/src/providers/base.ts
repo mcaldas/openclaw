@@ -16,8 +16,19 @@ import type {
   WebhookVerificationResult,
 } from "../types.js";
 
+/** Provider-side call recordings, downloaded after the call and then deleted at the provider. */
+export type CallRecordingApi = {
+  start(providerCallId: string): Promise<{ id: string }>;
+  list(providerCallId: string): Promise<{ id: string; ready: boolean; durationSeconds: number }[]>;
+  download(recordingId: string): Promise<Buffer>;
+  delete(recordingId: string): Promise<void>;
+};
+
 export interface VoiceCallProvider {
   readonly name: ProviderName;
+
+  /** Call recording, when the provider supports it. */
+  readonly recordings?: CallRecordingApi;
 
   setPublicUrl?(url: string): void;
 
