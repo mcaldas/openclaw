@@ -47,6 +47,7 @@ import { roomOf, type CallRooms } from "./room.js";
 import { setVoiceCallStateRuntime, type VoiceCallStateRuntime } from "./runtime-state.js";
 import type { TelephonyTtsRuntime } from "./telephony-tts.js";
 import { createTelephonyTtsProvider } from "./telephony-tts.js";
+import { createToolCallGuard } from "./tool-call-guard.js";
 import { startTunnel, type TunnelResult } from "./tunnel.js";
 import { TerminalStates, type CallRecord, type ToolHandlerContext } from "./types.js";
 import {
@@ -313,6 +314,23 @@ export async function createVoiceCallRuntime(params: {
       cfg,
       config.voicemail.holdOpeningMaxMs,
     );
+    // Every tool the plugin registers counts toward one per-call loop guard (see tool-call-guard.ts).
+    const toolGuard = createToolCallGuard({
+      onLoop: (callId, count) => {
+        log.warn(
+          `[voice-call] tool loop: ${count} tool calls in a minute; ending callId=${callId}`,
+        );
+        void manager.endCall(callId, { reason: "error" }).catch(() => undefined);
+      },
+    });
+    const registerToolHandler = realtimeHandler.registerToolHandler.bind(realtimeHandler);
+    realtimeHandler.registerToolHandler = (name, handler) =>
+      registerToolHandler(name, async (args, callId, context) => {
+        log.info(`[voice-call] tool ${name} callId=${callId}`);
+        return toolGuard.note(callId)
+          ? handler(args, callId, context)
+          : { error: "Too many tool calls on this call; it is being ended." };
+      });
     if (config.realtime.toolPolicy !== "none") {
       realtimeHandler.registerToolHandler(
         REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
