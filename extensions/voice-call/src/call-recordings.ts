@@ -3,6 +3,7 @@ import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { sleep as defaultSleep } from "openclaw/plugin-sdk/runtime-env";
 import type { CallRecordingApi } from "./providers/base.js";
+import { roomOf } from "./room.js";
 import { TerminalStates, type CallRecord } from "./types.js";
 
 /** What became of a call's recording; stored on the call record as `metadata.recording`. */
@@ -11,6 +12,10 @@ export type CallRecordingOutcome = {
   status: "recording" | "saved" | "failed";
   /** Local two-channel WAV files, one per provider recording (normally one). */
   paths: string[];
+  /** Whose leg each file records; channel 0 is that person alone. Room calls add the owner's leg. */
+  legs?: { leg: "callee" | "owner"; path: string; startedAt: number }[];
+  /** Per-speaker transcript built from the recordings, when one was made. */
+  transcriptPath?: string;
   durationSeconds?: number;
   /** Provider recordings still held at the provider, so nothing is lost when a download fails. */
   keptAtProvider?: string[];
@@ -28,7 +33,7 @@ const READY_POLL_MS = 3_000;
 const READY_TIMEOUT_MS = 120_000;
 const FINISHED_RETENTION_MS = 10 * 60_000;
 
-function recordingWanted(call: CallRecord): boolean {
+export function recordingWanted(call: CallRecord): boolean {
   const brief = call.metadata?.brief;
   return !(brief && typeof brief === "object" && "record" in brief && brief.record === false);
 }
@@ -58,6 +63,11 @@ export function createCallRecordings(params: {
   log: Logger;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** Builds a transcript from the saved legs and returns its file; failures are only logged. */
+  transcribe?: (
+    call: CallRecord,
+    legs: NonNullable<CallRecordingOutcome["legs"]>,
+  ) => Promise<string | undefined>;
 }) {
   const { api, log } = params;
   const sleep = params.sleep ?? defaultSleep;
@@ -125,15 +135,42 @@ export function createCallRecordings(params: {
     await fs.mkdir(params.dir, { recursive: true, mode: 0o700 });
     const date = new Date(call.startedAt).toISOString().slice(0, 10);
     const paths: string[] = [];
+    const legs: NonNullable<CallRecordingOutcome["legs"]> = [];
     const kept: string[] = [];
     const errors: string[] = [];
-    for (const [index, recording] of recordings.entries()) {
-      const suffix = index === 0 ? "" : `-${index + 1}`;
-      const file = path.join(params.dir, `${date}-${call.callId}${suffix}.wav`);
+    // A room call also recorded the owner's leg, once the owner answered.
+    const room = roomOf(call);
+    const owner =
+      room?.ownerCallSid && room.ownerAnsweredAt
+        ? await waitUntilReady(room.ownerCallSid).then(
+            (found) => ({ found, startedAt: room.ownerAnsweredAt ?? 0 }),
+            (error: unknown) => {
+              errors.push(`owner leg: ${formatErrorMessage(error)}`);
+              return undefined;
+            },
+          )
+        : undefined;
+    const files = [
+      ...recordings.map((recording, index) => ({
+        recording,
+        leg: "callee" as const,
+        name: `${date}-${call.callId}${index === 0 ? "" : `-${index + 1}`}.wav`,
+        startedAt: call.answeredAt ?? call.startedAt,
+      })),
+      ...(owner?.found ?? []).map((recording, index) => ({
+        recording,
+        leg: "owner" as const,
+        name: `${date}-${call.callId}-owner${index === 0 ? "" : `-${index + 1}`}.wav`,
+        startedAt: owner?.startedAt ?? 0,
+      })),
+    ];
+    for (const { recording, leg, name, startedAt } of files) {
+      const file = path.join(params.dir, name);
       try {
         // wx: never overwrite an earlier call's file.
         await fs.writeFile(file, await api.download(recording.id), { mode: 0o600, flag: "wx" });
         paths.push(file);
+        legs.push({ leg, path: file, startedAt });
       } catch (error) {
         kept.push(recording.id);
         errors.push(`${recording.id}: ${formatErrorMessage(error)}`);
@@ -148,9 +185,20 @@ export function createCallRecordings(params: {
         );
       }
     }
+    const transcriptPath =
+      legs.length > 0
+        ? await params.transcribe?.(call, legs).catch((error: unknown) => {
+            log.warn(
+              `[voice-call] Speaker transcript failed callId=${call.callId}: ${formatErrorMessage(error)}`,
+            );
+            return undefined;
+          })
+        : undefined;
     return {
       status: errors.length === 0 ? "saved" : "failed",
       paths,
+      ...(room ? { legs } : {}),
+      ...(transcriptPath ? { transcriptPath } : {}),
       durationSeconds: recordings.reduce((sum, recording) => sum + recording.durationSeconds, 0),
       ...(kept.length > 0 ? { keptAtProvider: kept } : {}),
       ...(errors.length > 0 ? { error: errors.join("; ") } : {}),

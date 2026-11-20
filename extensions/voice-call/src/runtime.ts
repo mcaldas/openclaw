@@ -30,11 +30,14 @@ import type { VoiceCallProvider } from "./providers/base.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import { buildRealtimeVoiceInstructions } from "./realtime-agent-context.js";
 import {
+  buildAddOwnerTool,
   REALTIME_VOICE_SEND_DTMF_TOOL_NAME,
   resolveVoiceCallRealtimeTools,
 } from "./realtime-call-control.js";
 import { resolveCallAgentId, resolveVoiceCallAgentId } from "./resolve-call-agent-id.js";
 import { resolveVoiceResponseModel } from "./response-model.js";
+import { createRecordingTranscriber, wireCallRooms } from "./room-runtime.js";
+import type { CallRooms } from "./room.js";
 import { setVoiceCallStateRuntime, type VoiceCallStateRuntime } from "./runtime-state.js";
 import type { TelephonyTtsRuntime } from "./telephony-tts.js";
 import { createTelephonyTtsProvider } from "./telephony-tts.js";
@@ -201,7 +204,10 @@ export async function createVoiceCallRuntime(params: {
   stateRuntime?: VoiceCallStateRuntime["state"];
   ttsRuntime?: TelephonyTtsRuntime;
   logger?: PluginLogger;
-  deliveryRuntime?: Pick<OpenClawPluginApi["runtime"], "gateway" | "subagent">;
+  deliveryRuntime?: Pick<
+    OpenClawPluginApi["runtime"],
+    "gateway" | "subagent" | "mediaUnderstanding"
+  >;
   runInServiceContext?: <T>(run: () => T) => T;
 }): Promise<VoiceCallRuntime> {
   params.scheduler.signal.throwIfAborted();
@@ -233,6 +239,9 @@ export async function createVoiceCallRuntime(params: {
     setVoiceCallStateRuntime({ state: stateRuntime });
   }
   const manager = new CallManager(config, undefined, cfg.session, stateRuntime);
+  // Known once the webhook is exposed; room legs need it for their status callbacks.
+  let publicWebhookUrl: string | null = null;
+  let rooms: CallRooms | undefined;
   const realtimeVoiceRuntime = config.realtime.enabled
     ? await import("./realtime-voice.runtime.js")
     : null;
@@ -254,7 +263,11 @@ export async function createVoiceCallRuntime(params: {
     });
     const realtimeConfig = {
       ...config.realtime,
-      tools: resolveVoiceCallRealtimeTools(config.realtime.toolPolicy, config.realtime.tools),
+      tools: resolveVoiceCallRealtimeTools(
+        config.realtime.toolPolicy,
+        config.realtime.tools,
+        config.room?.enabled ? [buildAddOwnerTool(config.room.ownerName ?? "the owner")] : [],
+      ),
     };
     const resolveCallRegistration = async (call: CallRecord) => {
       const numberRouteKey = resolveVoiceCallNumberRouteKeyForCall(call);
@@ -402,7 +415,13 @@ export async function createVoiceCallRuntime(params: {
         }
         // In-band only: the provider fallback would replace the TwiML and end this stream.
         const result = await manager.sendDtmf(callId, digits, { inBandOnly: true });
-        return result.success ? { success: true, digits } : { error: result.error };
+        return result.success
+          ? {
+              success: true,
+              digits,
+              note: "Keys sent. Say nothing; listen for the menu's next prompt.",
+            }
+          : { error: result.error };
       },
     );
     manager.playRealtimeKeypadTones = (callId, digits) =>
@@ -414,6 +433,15 @@ export async function createVoiceCallRuntime(params: {
       manager.beforeCallEnd = (call) => realtimeHandler.drainCall(call.callId);
     }
     webhookServer.setRealtimeHandler(realtimeHandler);
+    rooms = wireCallRooms({
+      config,
+      manager,
+      provider,
+      realtimeHandler,
+      webhookServer,
+      webhookUrl: () => publicWebhookUrl,
+      log,
+    });
   }
   const recordingApi = config.recording.enabled ? provider.recordings : undefined;
   if (config.recording.enabled && !recordingApi) {
@@ -427,6 +455,15 @@ export async function createVoiceCallRuntime(params: {
           // Only the recording key: the stored record keeps its newer delivery statuses.
           manager.persistDeliveryStatus({ ...call, metadata: { recording: outcome } }),
         log,
+        transcribe: params.deliveryRuntime?.mediaUnderstanding
+          ? createRecordingTranscriber({
+              config,
+              coreConfig: cfg,
+              mediaUnderstanding: params.deliveryRuntime.mediaUnderstanding,
+              dir: path.join(manager.storePath, "recordings"),
+              log,
+            })
+          : undefined,
       })
     : undefined;
   const delivery =
@@ -443,10 +480,11 @@ export async function createVoiceCallRuntime(params: {
           recordingFor: recordings?.finish,
         })
       : undefined;
-  if (recordings) {
+  if (recordings || rooms) {
     const deliverCallUpdate = manager.onCallUpdated;
     manager.onCallUpdated = (call) => {
-      recordings.observe(call);
+      recordings?.observe(call);
+      rooms?.observe(call);
       return deliverCallUpdate?.(call);
     };
   }
@@ -515,6 +553,7 @@ export async function createVoiceCallRuntime(params: {
     }
 
     const webhookUrl = publicUrl ?? localUrl;
+    publicWebhookUrl = webhookUrl;
 
     if (
       providerRequiresPublicWebhook(provider.name) &&

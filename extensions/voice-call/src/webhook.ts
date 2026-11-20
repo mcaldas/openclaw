@@ -30,6 +30,7 @@ import {
 } from "./config.js";
 import { getHeader } from "./http-headers.js";
 import type { CallManager } from "./manager.js";
+import { HOLD_MUSIC_TWIML } from "./manager/twiml.js";
 import type { MediaStreamConfig } from "./media-stream.js";
 import { MediaStreamHandler } from "./media-stream.js";
 import type { VoiceCallProvider } from "./providers/base.js";
@@ -37,6 +38,7 @@ import { isProviderStatusTerminal } from "./providers/shared/call-status.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import { normalizeProxyIp } from "./proxy-ip.js";
 import { resolveCallAgentId } from "./resolve-call-agent-id.js";
+import type { RoomWebhookRouter } from "./room.js";
 import type { CallRecord, NormalizedEvent, WebhookContext } from "./types.js";
 import type { WebhookResponsePayload } from "./webhook.types.js";
 import type { RealtimeCallHandler } from "./webhook/realtime-handler.js";
@@ -114,6 +116,8 @@ export class VoiceCallWebhookServer {
   // Revoke pending transcript replies before persistence has created a response guard.
   private readonly streamSpeechGenerations = new WeakMap<CallRecord, symbol>();
   private realtimeHandler: RealtimeCallHandler | null = null;
+  /** Room calls: Jarvis's and the owner's legs, answered before any other routing. */
+  roomRouter: RoomWebhookRouter | undefined;
   private replayResponses = new Map<string, CachedWebhookResponse>();
   private replayResponseCacheCalls = 0;
 
@@ -550,15 +554,7 @@ export class VoiceCallWebhookServer {
     const url = buildRequestUrl(req.url);
 
     if (url.pathname === "/voice/hold-music") {
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "text/xml" },
-        body: `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="alice">All agents are currently busy. Please hold.</Say>
-  <Play loop="0">https://s3.amazonaws.com/com.twilio.music.classical/BusyStrings.mp3</Play>
-</Response>`,
-      };
+      return { statusCode: 200, headers: { "Content-Type": "text/xml" }, body: HOLD_MUSIC_TWIML };
     }
 
     if (normalizeWebhookPath(url.pathname) !== normalizeWebhookPath(webhookPath)) {
@@ -648,6 +644,10 @@ export class VoiceCallWebhookServer {
       }
 
       const buildResponse = async (): Promise<WebhookResponsePayload> => {
+        const roomResponse = await this.roomRouter?.(ctx, req);
+        if (roomResponse) {
+          return roomResponse;
+        }
         const initialTwiML = this.provider.consumeInitialTwiML?.(ctx);
         if (initialTwiML !== undefined && initialTwiML !== null) {
           const params = new URLSearchParams(ctx.rawBody);

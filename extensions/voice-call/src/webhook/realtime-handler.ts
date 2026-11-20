@@ -34,6 +34,7 @@ import {
 } from "openclaw/plugin-sdk/websocket-runtime";
 import { resolveVoiceCallPublicPathPrefix, type VoiceCallRealtimeConfig } from "../config.js";
 import type { CallManager } from "../manager.js";
+import { generateRealtimeStreamTwiml } from "../manager/twiml.js";
 import { REALTIME_VOICE_END_CALL_TOOL_NAME } from "../realtime-call-control.js";
 import type { CallRecord, EndReason, NormalizedEvent, ToolHandlerContext } from "../types.js";
 import type { WebhookResponsePayload } from "../webhook.types.js";
@@ -76,6 +77,8 @@ const CALLER_SPEECH_RMS_THRESHOLD = 0.035;
 type StreamSessionRequest = {
   providerName?: "twilio" | "telnyx";
   callId?: string;
+  /** Room calls: the stream arrives on Jarvis's own leg; events still belong to this call SID. */
+  providerCallId?: string;
   from?: string;
   to?: string;
   direction?: "inbound" | "outbound";
@@ -223,8 +226,12 @@ export class RealtimeCallHandler {
     return `${this.publicPathPrefix}${normalizeWebhookPath(this.config.streamPath ?? "/voice/stream/realtime")}`;
   }
 
-  buildTwiMLPayload(req: http.IncomingMessage, params?: URLSearchParams): WebhookResponsePayload {
-    const rawDirection = params?.get("Direction");
+  buildTwiMLPayload(
+    req: http.IncomingMessage,
+    params?: URLSearchParams,
+    room?: { callId: string; providerCallId: string },
+  ): WebhookResponsePayload {
+    const rawDirection = room ? "outbound" : params?.get("Direction");
     const previousOrigin = this.publicOrigin;
     if (!previousOrigin) {
       this.publicOrigin = req.headers.host ?? DEFAULT_HOST;
@@ -235,18 +242,10 @@ export class RealtimeCallHandler {
         from: params?.get("From") ?? undefined,
         to: params?.get("To") ?? undefined,
         direction: rawDirection?.startsWith("outbound") ? "outbound" : "inbound",
+        ...room,
       });
-      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="${streamUrl}" />
-  </Connect>
-</Response>`;
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "text/xml" },
-        body: twiml,
-      };
+      const body = generateRealtimeStreamTwiml(streamUrl);
+      return { statusCode: 200, headers: { "Content-Type": "text/xml" }, body };
     } finally {
       this.publicOrigin = previousOrigin;
     }
@@ -308,14 +307,14 @@ export class RealtimeCallHandler {
               return;
             }
             initialized = true;
-            activeCallSid = frame.providerCallId;
+            activeCallSid = callerMeta.providerCallId ?? frame.providerCallId;
             activeStreamSid = frame.streamId;
             admitting = true;
             // pause() stops socket reads, but ws can still emit frames already in its receiver.
             ws.pause();
             const admission = this.handleCall(
               frame.streamId,
-              frame.providerCallId,
+              activeCallSid,
               ws,
               callerMeta,
               adapter,
@@ -504,6 +503,7 @@ export class RealtimeCallHandler {
     const meta: StreamSessionRequest = {
       providerName: request.providerName ?? "twilio",
       callId: request.callId,
+      providerCallId: request.providerCallId,
       from: request.from,
       to: request.to,
       direction: request.direction,
@@ -1227,7 +1227,8 @@ export class RealtimeCallHandler {
         outputAudioMode: session.bridge.outputAudioMode,
       });
     const sendAudioToSession = session.sendAudio.bind(session);
-    session.sendAudio = (audio) => {
+    session.sendAudio = (rawAudio) => {
+      const audio = audioController.filterInput(rawAudio);
       if (sessionClosed) {
         return;
       }

@@ -7,6 +7,7 @@ import {
   resolveVoiceCallSessionKey,
   type CallMode,
 } from "../config.js";
+import { roomOf, shouldUseRoom } from "../room.js";
 import { resolvePreferredTtsVoice } from "../tts-provider-voice.js";
 import {
   type EndReason,
@@ -39,6 +40,7 @@ type EndCallContext = Pick<
   | "endCallOperations"
   | "mutationQueue"
   | "beforeCallEnd"
+  | "room"
 >;
 
 type ConnectedCallContext = Pick<CallManagerContext, "activeCalls" | "provider">;
@@ -119,6 +121,14 @@ export async function initiateCall(
     return { callId: "", success: false, error: "fromNumber not configured" };
   }
 
+  // The callee joins a conference room; Jarvis joins it as his own leg once they answer.
+  const room = shouldUseRoom(ctx.config, {
+    mode,
+    dtmfSequence,
+    providerHasRooms: Boolean(ctx.provider.room),
+  })
+    ? `oc-${callId}`
+    : undefined;
   const pendingNotifyAmd =
     mode === "notify" &&
     Boolean(initialMessage) &&
@@ -152,6 +162,14 @@ export async function initiateCall(
         : {}),
       ...(requesterSessionKey ? { requesterSessionKey } : {}),
       ...(brief ? { brief } : {}),
+      ...(room
+        ? {
+            room: {
+              name: room,
+              ...(ctx.config.room?.muteHoldMusic === false && { muteHold: false }),
+            },
+          }
+        : {}),
       ...(brief?.maxDurationSeconds
         ? { maxDurationSeconds: Math.min(brief.maxDurationSeconds, ctx.config.maxDurationSeconds) }
         : {}),
@@ -207,6 +225,7 @@ export async function initiateCall(
       inlineTwiml,
       preConnectTwiml,
       ...(ctx.config.voicemail?.detection === "twilio" ? { voicemail: ctx.config.voicemail } : {}),
+      ...(room ? { room } : {}),
       ...(streamSession
         ? { streamUrl: streamSession.streamUrl, streamAuthToken: streamSession.token }
         : {}),
@@ -356,8 +375,21 @@ export async function sendDtmf(
     });
     return { success: true };
   };
-  // A live realtime stream takes in-band tones: replacing its TwiML would end the stream.
   const live = lookupConnectedCall(ctx, callId);
+  // Room calls press keys out of band on the callee's leg: phone menus ignore tones sent as audio.
+  if (live.kind === "ok" && ctx.room && roomOf(live.call)) {
+    const invalid = validateDtmfDigits(digits);
+    if (invalid) {
+      return { success: false, error: invalid };
+    }
+    try {
+      const sent = await ctx.room.pressKeys(live.call, digits);
+      return sent === "duplicate" ? { success: true } : await notePressed(live.call);
+    } catch (err) {
+      return { success: false, error: formatErrorMessage(err) };
+    }
+  }
+  // A live realtime stream takes in-band tones: replacing its TwiML would end the stream.
   if (live.kind === "ok") {
     try {
       if (await ctx.playRealtimeKeypadTones?.(callId, digits)) {
@@ -616,6 +648,10 @@ export function endCall(
 
   const operation = (async (): Promise<CallEndResult> => {
     try {
+      // Hand-over: with the owner in the room only Jarvis leaves; the callee's hang-up ends the call.
+      if (ctx.room && roomOf(call) && (await ctx.room.handOver(call))) {
+        return { success: true };
+      }
       await provider.hangupCall({
         callId,
         providerCallId,

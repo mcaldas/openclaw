@@ -54,6 +54,31 @@ const TwilioConfigSchema = z
   })
   .strict();
 
+/**
+ * Room mode: outbound calls run in a Twilio conference. Keys are pressed out of band on the
+ * callee's leg, the owner can be added as a third participant, and Jarvis can leave on hand-over.
+ */
+const VoiceCallRoomConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** TwiML App whose Voice URL is this plugin's webhook; Jarvis joins rooms through it. */
+    twimlAppSid: z
+      .string()
+      .regex(/^AP[0-9a-fA-F]{32}$/, "Expected a TwiML App SID (AP + 32 hex)")
+      .optional(),
+    /** Number rung by the add-owner tool (default: toNumber). */
+    ownerNumber: E164Schema.optional(),
+    /** Caller ID the owner sees (default: fromNumber). */
+    ownerCallerId: E164Schema.optional(),
+    /** How Jarvis names the owner in tool text and notes. */
+    ownerName: z.string().min(1).optional(),
+    /** Ring time for the owner; below most voicemail pickups (default 25). */
+    ownerRingSeconds: z.number().int().min(5).max(60).default(25),
+    /** Keep hold music away from the realtime model (default true). */
+    muteHoldMusic: z.boolean().default(true),
+  })
+  .strict();
+
 const PlivoConfigSchema = z
   .object({
     authId: z.string().min(1).optional(),
@@ -294,6 +319,7 @@ const VoiceCallConfigSchema = z
     reports: CallReportsConfigSchema,
     live: CallLiveConfigSchema,
     recording: CallRecordingConfigSchema,
+    room: VoiceCallRoomConfigSchema.optional(),
     callbacks: CallCallbacksConfigSchema,
     voicemail: CallVoicemailConfigSchema,
 
@@ -673,6 +699,14 @@ export function validateProviderConfig(config: VoiceCallConfig) {
     errors.push(
       'plugins.entries.voice-call.config.inboundPolicy must not be "disabled" when realtime.enabled is true',
     );
+  }
+
+  if (config.room?.enabled) {
+    if (config.provider !== "twilio" || !config.realtime.enabled || !config.room.twimlAppSid) {
+      errors.push(
+        "plugins.entries.voice-call.config.room.enabled needs provider twilio, realtime.enabled and room.twimlAppSid",
+      );
+    }
   }
 
   if (config.realtime.enabled && config.streaming.enabled) {

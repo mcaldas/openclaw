@@ -161,6 +161,7 @@ export class CallManager {
   playRealtimeVoicemail: CallManagerContext["playRealtimeVoicemail"];
   playRealtimeKeypadTones: CallManagerContext["playRealtimeKeypadTones"];
   beforeCarrierPlayback: CallManagerContext["beforeCarrierPlayback"];
+  room: CallManagerContext["room"];
 
   private publishCallUpdate = (call: CallRecord): void => {
     const work = this.onCallUpdated?.(call);
@@ -517,7 +518,11 @@ export class CallManager {
       playRealtimeKeypadTones: this.playRealtimeKeypadTones,
       beforeCarrierPlayback: this.beforeCarrierPlayback,
       onCallerSpeech: (call) => this.invalidateAutoResponse(call),
-      onCallAnswered: (call) => this.maybeSpeakInitialMessageOnAnswered(call),
+      onCallAnswered: (call) => {
+        this.room?.onAnswered(call);
+        this.maybeSpeakInitialMessageOnAnswered(call);
+      },
+      room: this.room,
       streamSessionIssuer: this.streamSessionIssuer,
     };
   }

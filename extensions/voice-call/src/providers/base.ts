@@ -24,11 +24,37 @@ export type CallRecordingApi = {
   delete(recordingId: string): Promise<void>;
 };
 
+/** A leg added to a call's conference room. */
+export type RoomParticipantInput = {
+  to: string;
+  from: string;
+  statusCallback: string;
+  /** Seconds to ring before giving up (default 30). */
+  timeoutSeconds?: number;
+  /** Record this leg, one side per channel. */
+  record?: boolean;
+};
+
+/** Conference rooms: the call's legs meet in a room, so keys, a third person and hand-over work. */
+export type CallRoomApi = {
+  addParticipant(
+    room: string,
+    input: RoomParticipantInput,
+  ): Promise<{ callSid: string; conferenceSid?: string }>;
+  /** Press keys on one leg: it steps out of the room for a moment and comes back. */
+  pressKeys(callSid: string, room: string, digits: string): Promise<void>;
+  /** End one leg only. */
+  hangupLeg(callSid: string): Promise<void>;
+};
+
 export interface VoiceCallProvider {
   readonly name: ProviderName;
 
   /** Call recording, when the provider supports it. */
   readonly recordings?: CallRecordingApi;
+
+  /** Conference rooms, when the provider supports them. */
+  readonly room?: CallRoomApi;
 
   setPublicUrl?(url: string): void;
 

@@ -153,10 +153,14 @@ export type InitiateCallInput = {
   /** Per-call auth token the carrier echoes back on the WS upgrade. */
   streamAuthToken?: string;
   voicemail?: Omit<VoiceCallConfig["voicemail"], "holdOpeningMaxMs">;
+  /** Room calls: the callee joins this conference room instead of running webhook TwiML. */
+  room?: string;
 };
 
 export type InitiateCallResult = {
   providerCallId: string;
+  /** Room calls: the conference the callee joined. */
+  conferenceSid?: string;
   status: "initiated" | "queued";
 };
 

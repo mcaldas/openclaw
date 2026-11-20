@@ -1,6 +1,7 @@
 import type { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
 import type { VoiceCallConfig, VoiceCallCoreSessionConfig } from "../config.js";
 import type { VoiceCallProvider } from "../providers/base.js";
+import type { CallRoomHooks } from "../room.js";
 import type { VoiceCallStateRuntime } from "../runtime-state.js";
 import type { CallId, CallRecord } from "../types.js";
 
@@ -45,6 +46,8 @@ export type CallManagerContext = {
   ) => Promise<{ durationMs: number; confirmed: boolean }> | undefined;
   beforeCarrierPlayback?: (callId: CallId) => Promise<void>;
   onCallAnswered?: (call: CallRecord) => void;
+  /** Conference rooms for outbound calls, when room mode is on. */
+  room?: CallRoomHooks;
   onCallerSpeech?: (call: CallRecord) => void;
   streamSessionIssuer?: StreamSessionIssuer;
 };

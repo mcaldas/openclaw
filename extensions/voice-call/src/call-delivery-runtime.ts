@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { createNativeSessionBindingScope } from "openclaw/plugin-sdk/agent-harness-session-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginLogger } from "openclaw/plugin-sdk/core";
@@ -66,6 +67,7 @@ function formatReport(
   summary: string,
   includeTranscript: boolean,
   recording?: CallRecordingOutcome,
+  speakerTranscript?: string,
 ): string {
   const duration = Math.max(0, Math.round(((call.endedAt ?? Date.now()) - call.startedAt) / 1000));
   const lines = [
@@ -96,11 +98,14 @@ function formatReport(
       `Recording problem: ${recording.error}${kept ? ` (kept at provider: ${kept})` : ""}`,
     );
   }
+  if (recording?.transcriptPath) {
+    lines.push(`Transcript file: ${recording.transcriptPath}`);
+  }
   if (includeTranscript) {
     lines.push(
       "",
-      "Transcript:",
-      formatCallTranscript(call.transcript) || "(No final speech recorded)",
+      speakerTranscript ? "Transcript (from the recordings, one line per speaker):" : "Transcript:",
+      speakerTranscript || formatCallTranscript(call.transcript) || "(No final speech recorded)",
     );
   }
   return lines.join("\n");
@@ -249,7 +254,7 @@ export function createCallDeliveryRuntime(params: {
       );
     }
   };
-  const summarize = async (call: CallRecord, model?: string) => {
+  const summarize = async (call: CallRecord, model?: string, speakerTranscript?: string) => {
     assertActive();
     const result = await params.runtime.subagent.complete({
       agentId: call.agentId ?? resolveVoiceCallAgentId(params.config, params.coreConfig),
@@ -263,7 +268,7 @@ export function createCallDeliveryRuntime(params: {
         notifyError: call.metadata?.notifyError ?? null,
         endReason: call.endReason ?? call.state,
         answeredBy: call.metadata?.answeredBy ?? null,
-        transcript: formatCallTranscript(call.transcript),
+        transcript: speakerTranscript ?? formatCallTranscript(call.transcript),
       }),
       extraSystemPrompt: REPORT_SUMMARY_INSTRUCTIONS,
       ...(model ? { model } : {}),
@@ -371,21 +376,36 @@ export function createCallDeliveryRuntime(params: {
       // Persist before inference or sending so a restart records the interrupted attempt.
       await saveStatus(call, "callReport", { status: "pending", at: Date.now() });
       assertDeliveryActive();
+      // Recordings settle shortly after hang-up, so the report can carry the file path and the
+      // per-speaker transcript made from them, which hears the other side better than the live one.
+      const recording = await unlessStopped(params.recordingFor?.(call));
+      const speakerTranscript = recording?.transcriptPath
+        ? await fs.readFile(recording.transcriptPath, "utf8").then(
+            (text) => text.replace(/^# .*\n+/, "").trim(),
+            () => undefined,
+          )
+        : undefined;
+      assertDeliveryActive();
       let summary = "Outcome: needs follow-up. Summary unavailable; review the transcript.";
       let summaryError: string | undefined;
       try {
-        summary = (await summarize(call, params.config.reports.summaryModel)).trim() || summary;
+        summary =
+          (await summarize(call, params.config.reports.summaryModel, speakerTranscript)).trim() ||
+          summary;
       } catch (error) {
         summaryError = formatErrorMessage(error);
         onDeliveryError(error);
       }
       assertDeliveryActive();
-      // Recordings settle shortly after hang-up, so the report can carry the file path.
-      const recording = await unlessStopped(params.recordingFor?.(call));
-      assertDeliveryActive();
       await deliver({
         sessionKey,
-        text: formatReport(call, summary, params.config.reports.includeTranscript, recording),
+        text: formatReport(
+          call,
+          summary,
+          params.config.reports.includeTranscript,
+          recording,
+          speakerTranscript,
+        ),
         idempotencyKey: `voice-call:${call.callId}:report`,
       });
       await saveStatus(call, "callReport", {

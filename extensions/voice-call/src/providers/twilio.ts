@@ -33,6 +33,7 @@ import {
 import { mapProviderStatusToEndReason, normalizeProviderStatus } from "./shared/call-status.js";
 import { resolveTwilioApiBaseUrl, type TwilioRegion } from "./twilio-region.js";
 import { TwilioApiError, createTwilioApi } from "./twilio/api.js";
+import { createTwilioRoomApi } from "./twilio/conference.js";
 import { createTwilioRecordingApi } from "./twilio/recordings.js";
 
 export interface TwilioProviderOptions {
@@ -85,6 +86,7 @@ export class TwilioProvider implements VoiceCallProvider {
   private readonly apiRequest: ReturnType<typeof createTwilioApi>["request"];
   readonly getCallStatus: VoiceCallProvider["getCallStatus"];
   readonly recordings: CallRecordingApi;
+  readonly room: ReturnType<typeof createTwilioRoomApi>;
   private readonly callWebhookUrls = new Map<string, string>();
   private readonly options: TwilioProviderOptions;
 
@@ -133,6 +135,10 @@ export class TwilioProvider implements VoiceCallProvider {
     });
     this.apiRequest = api.request;
     this.getCallStatus = api.getCallStatus;
+    this.room = createTwilioRoomApi({
+      request: (endpoint, body, opts) => this.apiRequest(endpoint, body, opts),
+      updateTwiml: (callSid, twiml) => this.updateLiveCallTwiml(callSid, twiml, "pressKeys"),
+    });
     this.recordings = createTwilioRecordingApi({
       baseUrl: resolveTwilioApiBaseUrl({ accountSid: config.accountSid, region: config.region }),
       authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64")}`,
@@ -529,6 +535,26 @@ export class TwilioProvider implements VoiceCallProvider {
         input.voicemail.machineDetectionSilenceTimeoutMs,
       );
       params.MachineDetectionTimeout = String(input.voicemail.machineDetectionTimeoutMs / 1000);
+    }
+
+    if (input.room) {
+      // The callee joins the call's room; Jarvis joins too once the callee answers.
+      // Participants take machine detection under other names than Calls.json.
+      const leg = { ...params };
+      for (const key of ["AsyncAmd", "AsyncAmdStatusCallback", "AsyncAmdStatusCallbackMethod"]) {
+        delete leg[key];
+      }
+      if (params.AsyncAmdStatusCallback) {
+        leg.AmdStatusCallback = params.AsyncAmdStatusCallback;
+        leg.AmdStatusCallbackMethod = "POST";
+      }
+      const joined = await this.room.join(input.room, leg);
+      this.callWebhookUrls.set(joined.callSid, url.toString());
+      return {
+        providerCallId: joined.callSid,
+        conferenceSid: joined.conferenceSid,
+        status: "queued",
+      };
     }
 
     if (input.inlineTwiml) {
