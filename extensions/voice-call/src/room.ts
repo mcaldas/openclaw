@@ -108,6 +108,8 @@ export function createCallRooms(deps: {
   note: (callId: CallId, instructions: string) => void;
   /** Off while the owner is on the line: Jarvis must hear everything then, music or not. */
   allowHold: (callId: CallId, allowed: boolean) => void;
+  /** Context for Jarvis that he does not answer (who is speaking); false when it cannot go. */
+  context?: (callId: CallId, text: string) => boolean;
   recordOwner: (call: CallRecord) => boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -157,9 +159,43 @@ export function createCallRooms(deps: {
   };
 
   const notes = {
-    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you.`,
+    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you. While both are on the line, a bracketed line tells you whenever the speaker changes; trust it over the voice, they may sound alike.`,
+    ownerSpeaking: `[${ownerName} is speaking now, from ${ownerName}'s own phone.]`,
+    calleeSpeaking: "[The person you called is speaking now, from the line you called.]",
     noAnswer: `${ownerName} did not answer. Tell the other person briefly, then carry on with the task yourself, or ask for a direct number or a good time for ${ownerName} to call back.`,
     left: `${ownerName} has left the call. Carry on with the task yourself; if it is done, say goodbye and end the call.`,
+  };
+
+  /** Last person Jarvis was told is speaking, per call: notes go out on a change only. */
+  const lastSpeaker = new Map<CallId, "owner" | "callee">();
+  /** Twilio speaker events, by leg: with both people in the room, say who talks on a change. */
+  const noteSpeaker = (callId: CallId, form: URLSearchParams) => {
+    if (form.get("StatusCallbackEvent") !== "participant-speech-start") {
+      return;
+    }
+    const call = deps.manager.getCall(callId);
+    const room = roomOf(call);
+    if (!call || !room || room.owner !== "in-room") {
+      lastSpeaker.delete(callId);
+      return;
+    }
+    const sid = form.get("CallSid");
+    const who = !sid
+      ? undefined
+      : sid === room.ownerCallSid
+        ? "owner"
+        : sid === call.providerCallId
+          ? "callee"
+          : undefined; // Jarvis's own leg, or one that already left
+    if (!who || lastSpeaker.get(callId) === who) {
+      return;
+    }
+    lastSpeaker.set(callId, who);
+    const sent = deps.context?.(
+      callId,
+      who === "owner" ? notes.ownerSpeaking : notes.calleeSpeaking,
+    );
+    log(`room ${room.name}: ${who} speaking${sent ? "" : " (note not delivered)"}`);
   };
 
   const ownerJoined = async (call: CallRecord, callSid: string) => {
@@ -386,10 +422,17 @@ export function createCallRooms(deps: {
         return typeof value === "string" ? value : (form.get(name) ?? undefined);
       };
       const leg = param("leg");
-      if (leg !== "agent" && leg !== "owner") {
+      if (leg !== "agent" && leg !== "owner" && leg !== "conference") {
         return undefined;
       }
       const callId = param("callId") ?? "";
+      if (query?.type === ROOM_STATUS_TYPE && leg === "conference") {
+        noteSpeaker(callId, form);
+        return twiml("");
+      }
+      if (leg === "conference") {
+        return undefined;
+      }
       if (query?.type === ROOM_STATUS_TYPE) {
         await onLegStatus(callId, leg, form, query?.check === "voicemail");
         return twiml("");
@@ -421,6 +464,7 @@ export function createCallRooms(deps: {
       closed.add(call.callId);
       setTimeout(() => closed.delete(call.callId), CLOSED_RETENTION_MS).unref?.();
       keys.delete(call.callId);
+      lastSpeaker.delete(call.callId);
       for (const sid of [room.agentGone ? undefined : room.agentCallSid, room.ownerCallSid]) {
         if (sid) {
           void deps.carrier.hangupLeg(sid).catch((err: unknown) => {

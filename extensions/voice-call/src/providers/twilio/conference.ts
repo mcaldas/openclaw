@@ -36,6 +36,26 @@ function voicemailCheck(statusCallback: string): Record<string, string> {
   };
 }
 
+/**
+ * Who speaks when, per leg: Twilio's conference speaker events go to the room webhook. Only the
+ * first leg's settings count (the callee's, which creates the room); later legs repeat them.
+ */
+function speakerEvents(statusCallback: unknown): Record<string, string> {
+  // Speaker events are a nicety: a leg without a usable status URL still joins.
+  if (typeof statusCallback !== "string" || !URL.canParse(statusCallback)) {
+    return {};
+  }
+  const url = new URL(statusCallback);
+  url.searchParams.set("type", "room"); // ROOM_STATUS_TYPE in room.ts
+  url.searchParams.set("leg", "conference");
+  url.searchParams.delete("check");
+  return {
+    ConferenceStatusCallback: url.toString(),
+    ConferenceStatusCallbackMethod: "POST",
+    ConferenceStatusCallbackEvent: "speaker",
+  };
+}
+
 /** Twilio's <Play digits> knows digits, * # and w (0.5 s pause). */
 export function toTwilioKeys(digits: string): string {
   return digits.replace(/[pP,]/g, "w").replace(/W/g, "ww");
@@ -49,7 +69,7 @@ export function createTwilioRoomApi(params: {
   const join = async (room: string, leg: Record<string, string | string[]>) => {
     const result = await params.request<ParticipantResponse>(
       `/Conferences/${encodeURIComponent(room)}/Participants.json`,
-      { ...ROOM_LEG, ...leg },
+      { ...ROOM_LEG, ...speakerEvents(leg.StatusCallback), ...leg },
     );
     if (!result?.call_sid) {
       throw new Error("Twilio did not return a call SID for the room participant");

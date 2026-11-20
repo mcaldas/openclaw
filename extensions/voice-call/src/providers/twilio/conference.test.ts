@@ -39,6 +39,10 @@ describe("createTwilioRoomApi", () => {
         EndConferenceOnExit: "false",
         JitterBufferSize: "small",
         EarlyMedia: "false",
+        // Speaker events per leg, at the room webhook; Twilio keeps the first leg's settings.
+        ConferenceStatusCallback: "https://gw/voice/webhook?callId=call-1&type=room&leg=conference",
+        ConferenceStatusCallbackMethod: "POST",
+        ConferenceStatusCallbackEvent: "speaker",
         To: "+972500000001",
         From: "+972500000002",
         StatusCallback: "https://gw/voice/webhook?callId=call-1&type=room&leg=owner",
