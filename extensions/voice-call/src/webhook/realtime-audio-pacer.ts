@@ -15,6 +15,8 @@ type RealtimeAudioQueueItem =
   | {
       chunk: Buffer;
       durationMs: number;
+      /** Survives a held clear: keypad tones must reach the line whole. */
+      keep?: boolean;
       segment: RealtimePlaybackSegment;
       type: "audio";
     }
@@ -63,13 +65,15 @@ export class RealtimeAudioPacer {
       onPlaybackReset?: () => void;
       /** Fires for each audio chunk actually written to the carrier stream. */
       onAudioSent?: (audio: Buffer) => void;
+      /** While false, a clear drops only queued audio not sent with keep, and the carrier buffer is left alone. */
+      canClear?: () => boolean;
       send: (message: string) => boolean;
       serializer: Pick<StreamFrameAdapter, "serializeMedia" | "serializeClear" | "serializeMark">;
     },
   ) {}
 
   /** Queue mulaw audio and split it into 20ms-ish telephony chunks. */
-  sendAudio(muLaw: Buffer, metadata?: { itemId?: string }): void {
+  sendAudio(muLaw: Buffer, metadata?: { itemId?: string; keep?: boolean }): void {
     if (this.closed || muLaw.length === 0) {
       return;
     }
@@ -92,6 +96,7 @@ export class RealtimeAudioPacer {
         type: "audio",
         chunk,
         durationMs,
+        keep: metadata?.keep,
         segment,
       });
       this.queuedAudioBytes += chunk.length;
@@ -177,10 +182,38 @@ export class RealtimeAudioPacer {
     if (this.closed) {
       return 0;
     }
+    if (this.params.canClear?.() === false) {
+      return this.dropUnkeptAudio();
+    }
     const clearedAudioBytes = this.queuedAudioBytes;
     this.resetPlaybackState();
     this.params.send(this.params.serializer.serializeClear());
     return clearedAudioBytes;
+  }
+
+  /** Audio queued but not yet sent, in milliseconds of playout. */
+  queuedAudioMs(): number {
+    return this.queuedAudioBytes / 8;
+  }
+
+  /** Drop queued audio that was not sent with keep; marks and kept audio play on in order. */
+  private dropUnkeptAudio(): number {
+    let droppedBytes = 0;
+    const kept: RealtimeAudioQueueItem[] = [];
+    for (const item of this.queue.slice(this.queueHead)) {
+      if (item.type === "audio" && !item.keep) {
+        droppedBytes += item.chunk.length;
+        item.segment.totalMs -= item.durationMs;
+      } else {
+        kept.push(item);
+      }
+    }
+    this.queue = kept;
+    this.queueHead = 0;
+    this.queuedAudioBytes -= droppedBytes;
+    // A segment with no audio left was never sent, so it has no playout to account for.
+    this.playbackSegments = this.playbackSegments.filter((segment) => segment.totalMs > 0);
+    return droppedBytes;
   }
 
   /** True while queued audio or a paced send timer can still reach the telephony stream. */

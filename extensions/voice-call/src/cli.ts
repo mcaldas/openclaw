@@ -452,10 +452,12 @@ export function registerVoiceCallCli(params: {
     .action((options: { callId: string; digits: string }) =>
       managerAction({
         gatewayCall: () =>
-          callVoiceCallGateway("voicecall.dtmf", {
-            callId: options.callId,
-            digits: options.digits,
-          }),
+          // Live realtime calls answer once the tones have played, not when they are queued.
+          callVoiceCallGateway(
+            "voicecall.dtmf",
+            { callId: options.callId, digits: options.digits },
+            { timeoutMs: resolveOperationTimeout(config) },
+          ),
         managerFallback: (manager) => manager.sendDtmf(options.callId, options.digits),
         failureLabel: "dtmf",
       }),

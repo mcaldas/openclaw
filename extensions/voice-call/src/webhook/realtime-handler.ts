@@ -15,7 +15,6 @@ import {
   createSpeechThresholdGate,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
-  readRealtimeVoiceConsultQuestion,
   readSpeakableRealtimeVoiceToolResult,
   resolveRealtimeVoiceBargeIn,
   resolveRealtimeVoiceSessionPolicy,
@@ -27,10 +26,6 @@ import {
   type RealtimeVoiceSessionHarness,
 } from "openclaw/plugin-sdk/realtime-voice";
 import { sleep } from "openclaw/plugin-sdk/runtime-env";
-import {
-  asOptionalRecord,
-  normalizeOptionalString,
-} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { normalizeWebhookPath } from "openclaw/plugin-sdk/webhook-ingress";
 import {
   rejectWebSocketUpgrade,
@@ -49,6 +44,7 @@ import {
   buildGreetingInstructions,
   buildVerbatimGreetingInstructions,
   speakOnRealtimeBridge,
+  withFallbackConsultQuestion,
   type RealtimeCallControlResult,
 } from "./realtime-call-session-control.js";
 import {
@@ -77,32 +73,6 @@ const CONSULT_TRANSCRIPT_SETTLE_MAX_MS = 1_000;
 const RECENT_FINAL_USER_TRANSCRIPT_TTL_MS = 2_000;
 const BARGE_IN_REQUIRED_LOUD_CHUNKS = 2;
 const CALLER_SPEECH_RMS_THRESHOLD = 0.035;
-
-function withFallbackConsultQuestion(args: unknown, fallback: string | undefined): unknown {
-  const providerQuestion = readRealtimeVoiceConsultQuestion(args);
-  const question = fallback?.trim();
-  if (providerQuestion) {
-    if (
-      question &&
-      providerQuestion.length <= 40 &&
-      question.length >= providerQuestion.length + 8
-    ) {
-      const record = asOptionalRecord(args);
-      const context = normalizeOptionalString(record?.context);
-      const fallbackContext = `Realtime provider supplied a shorter consult question: ${providerQuestion}`;
-      return {
-        ...record,
-        question,
-        context: context ? `${context}\n\n${fallbackContext}` : fallbackContext,
-      };
-    }
-    return args;
-  }
-  if (!question) {
-    return args;
-  }
-  return { ...asOptionalRecord(args), question };
-}
 
 type StreamSessionRequest = {
   providerName: "twilio" | "telnyx";
@@ -208,6 +178,7 @@ type RealtimeTelephonyBinding = {
   endCall: () => void;
   noteMediaActivity: () => void;
   playVoicemail: (instructions: string) => Promise<void>;
+  playKeypadTones: (digits: string) => Promise<{ durationMs: number; confirmed: boolean }>;
   retire: () => void;
 };
 
@@ -522,6 +493,11 @@ export class RealtimeCallHandler {
 
   playVoicemail(callId: string, instructions: string): Promise<void> | undefined {
     return this.activeTelephonyBindingsByCallId.get(callId)?.playVoicemail(instructions);
+  }
+
+  /** In-band keypad tones on the live stream; undefined when no realtime stream owns the call. */
+  playKeypadTones(callId: string, digits: string) {
+    return this.activeTelephonyBindingsByCallId.get(callId)?.playKeypadTones(digits);
   }
 
   async drainCall(callId: string): Promise<void> {
@@ -1388,6 +1364,7 @@ export class RealtimeCallHandler {
       },
       noteMediaActivity: () => activity.noteMedia(),
       playVoicemail: (speechInstructions) => hostSpeech.speak(speechInstructions),
+      playKeypadTones: (digits) => audioController.playKeypadTones(digits),
       retire: () => {
         void closeBinding();
       },

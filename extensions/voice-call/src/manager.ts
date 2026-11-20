@@ -159,6 +159,7 @@ export class CallManager {
   onCallUpdated: CallManagerContext["onCallUpdated"];
   beforeCallEnd: CallManagerContext["beforeCallEnd"];
   playRealtimeVoicemail: CallManagerContext["playRealtimeVoicemail"];
+  playRealtimeKeypadTones: CallManagerContext["playRealtimeKeypadTones"];
   beforeCarrierPlayback: CallManagerContext["beforeCarrierPlayback"];
 
   private publishCallUpdate = (call: CallRecord): void => {
@@ -509,6 +510,7 @@ export class CallManager {
       onCallUpdated: this.publishCallUpdate,
       beforeCallEnd: this.beforeCallEnd,
       playRealtimeVoicemail: this.playRealtimeVoicemail,
+      playRealtimeKeypadTones: this.playRealtimeKeypadTones,
       beforeCarrierPlayback: this.beforeCarrierPlayback,
       onCallerSpeech: (call) => this.invalidateAutoResponse(call),
       onCallAnswered: (call) => this.maybeSpeakInitialMessageOnAnswered(call),

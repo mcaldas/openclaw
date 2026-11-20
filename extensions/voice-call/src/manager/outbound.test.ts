@@ -329,6 +329,29 @@ it("sends DTMF through connected provider calls", async () => {
   });
 });
 
+it("plays DTMF in-band on a live realtime stream instead of replacing its TwiML", async () => {
+  const sendDtmfProvider = vi.fn(async () => {});
+  const { ctx } = connected({ name: "telnyx", sendDtmf: sendDtmfProvider });
+  const playRealtimeKeypadTones = vi.fn(async () => ({ durationMs: 720, confirmed: true }));
+  Object.assign(ctx, { playRealtimeKeypadTones });
+
+  expect(await sendDtmf(ctx as never, "call-1", "1A#")).toEqual({ success: true });
+  expect(playRealtimeKeypadTones).toHaveBeenCalledWith("call-1", "1A#");
+  expect(sendDtmfProvider).not.toHaveBeenCalled();
+
+  playRealtimeKeypadTones.mockRejectedValueOnce(new Error("Realtime call stream is closed"));
+  await expectFailure(sendDtmf(ctx as never, "call-1", "1"), "Realtime call stream is closed");
+});
+
+it("keeps the provider DTMF path when no realtime stream owns the call", async () => {
+  const sendDtmfProvider = vi.fn(async () => {});
+  const { ctx } = connected({ name: "twilio", sendDtmf: sendDtmfProvider });
+  Object.assign(ctx, { playRealtimeKeypadTones: vi.fn(() => undefined) });
+
+  expect(await sendDtmf(ctx as never, "call-1", "9")).toEqual({ success: true });
+  expect(sendDtmfProvider).toHaveBeenCalledOnce();
+});
+
 it("rejects invalid or unsupported outbound DTMF", async () => {
   const { ctx } = connected({ name: "telnyx" });
 

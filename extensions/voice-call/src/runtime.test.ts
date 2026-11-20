@@ -525,7 +525,7 @@ describe("createVoiceCallRuntime lifecycle", () => {
     );
   });
 
-  it("always exposes the built-in end-call tool without allowing configured replacement", async () => {
+  it("always exposes the built-in call controls without allowing configured replacement", async () => {
     const config = createRealtimeConfig({
       toolPolicy: "none",
       tools: [
@@ -535,6 +535,7 @@ describe("createVoiceCallRuntime lifecycle", () => {
           description: "Configured replacement",
           parameters: { type: "object", properties: { callId: { type: "string" } } },
         },
+        { ...customTool, name: "openclaw_send_dtmf", description: "Configured replacement" },
         customTool,
       ],
     });
@@ -542,13 +543,21 @@ describe("createVoiceCallRuntime lifecycle", () => {
     await createRuntime({ config });
 
     const tools = realtimeArgs()[0].tools;
-    expect(tools.map((tool) => tool.name)).toEqual(["openclaw_end_call", "custom_tool"]);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "openclaw_end_call",
+      "openclaw_send_dtmf",
+      "custom_tool",
+    ]);
+    expect(tools[1]?.parameters.required).toEqual(["digits"]);
     const endCallTool = expectDefined(tools[0], "end-call tool");
     expect(endCallTool.parameters).toEqual({
       type: "object",
       properties: {},
     });
-    expect(mocks.realtimeHandlerRegisterToolHandler).not.toHaveBeenCalled();
+    // Keypad tones are a call control, so they stay registered with consults disabled.
+    expect(mocks.realtimeHandlerRegisterToolHandler.mock.calls.map(([name]) => name)).toEqual([
+      "openclaw_send_dtmf",
+    ]);
   });
 
   it.each(["aborted", "model-locked"] as const)(
