@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeDtmfMulaw } from "../dtmf-tones.js";
 import {
   createRealtimeCallPlayback,
+  sendSilentContext,
   modelQuietWindows,
   SILENT_TOOL_QUIET_MS,
 } from "./realtime-call-playback.js";
@@ -51,6 +52,20 @@ function mediaAudio(messages: string[]): Buffer {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("sendSilentContext", () => {
+  it("uses the session's addContext when the core has it, and reports false otherwise", () => {
+    const addContext = vi.fn(() => true);
+    expect(sendSilentContext({ addContext } as never, "[note]")).toBe(true);
+    expect(addContext).toHaveBeenCalledWith("[note]");
+    expect(sendSilentContext({} as never, "[note]")).toBe(false);
+    expect(sendSilentContext(undefined, "[note]")).toBe(false);
+    const failing = vi.fn(() => {
+      throw new Error("closed");
+    });
+    expect(sendSilentContext({ addContext: failing } as never, "[note]")).toBe(false);
+  });
+});
 
 describe("model quiet window", () => {
   it("drops the model's reply to a silent tool for a few seconds, then plays it again", async () => {

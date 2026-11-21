@@ -38,6 +38,8 @@ export type RealtimeVoiceBridgeSession = Pick<
   bridge: RealtimeVoiceBridge;
   readonly capabilities?: InternalRealtimeVoiceProviderCapabilities;
   sendUserMessage(text: string): void;
+  /** Context without a response; false when the provider cannot (see RealtimeVoiceBridge). */
+  addContext(text: string): boolean;
   handleBargeIn(options?: RealtimeVoiceBargeInOptions): void;
   triggerGreeting(instructions?: string): void;
 };
@@ -151,6 +153,12 @@ export function createRealtimeVoiceBridgeSession(
         const bridge = requireBridge();
         requestResponse(bridge.sendUserMessage?.bind(bridge, text));
       }
+    },
+    addContext: (text) => {
+      if (!text.trim() || !isAdmitting()) {
+        return false;
+      }
+      return requireBridge().addContext?.(text) ?? false;
     },
     handleBargeIn: (options) => {
       if (!isAdmitting()) {

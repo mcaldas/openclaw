@@ -62,7 +62,12 @@ export const REALTIME_VOICE_WHO_SPOKE_TOOL_NAME = "openclaw_who_spoke";
  * sent when the owner joins (same-voice lab call 2026-11-20: 2 of 3 answers to the right person).
  */
 export function whoSpokeInstructions(ownerName: string): string {
-  return `Three-way calls: once ${ownerName} has joined, every time you are about to answer, first call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} and answer the person it names. ${ownerName} and the other person may sound exactly alike, so never decide by the voice or by what was said; a question about who they are talking to comes from whoever spoke last.`;
+  return [
+    `You are ${ownerName}'s assistant. Always present yourself as ${ownerName}'s assistant, never as ${ownerName}. When someone asks who they are talking to, say you are ${ownerName}'s assistant and, once ${ownerName} has joined, that ${ownerName} is also on the line.`,
+    `Answer every direct question from the person you called, even when you do not have the information: say that you do not have it and, if ${ownerName} is on the line, ask ${ownerName} to answer.`,
+    "Lines in square brackets are private notes to you: never read them out or reply to them; use what they tell you.",
+    `Three-way calls: once ${ownerName} has joined, stay on the call until ${ownerName} tells you that you can go, or the call ends; finishing the errand is not a reason to leave. Whenever the speaker changes you get a bracketed note such as "[${ownerName} is speaking now]"; when you have no such note for the person you are about to answer, or are unsure, call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} first. ${ownerName} and the other person may sound exactly alike, so never decide by the voice; a question about who they are talking to comes from whoever spoke last.`,
+  ].join("\n");
 }
 
 /** Room calls only: who spoke last, by phone line (Twilio speaker events), not by voice. */

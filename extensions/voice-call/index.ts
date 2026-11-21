@@ -186,8 +186,13 @@ export default definePluginEntry({
       ({ params, client, hasCurrentClientAuthority, signal }) => {
         const scopes = client?.connect.scopes ?? [];
         const operator = scopes.includes("operator.write") || scopes.includes("operator.admin");
-        if (params.mode !== undefined && params.mode !== "say" && params.mode !== "guidance") {
-          throw new VoiceCallCommandInputError("mode must be say or guidance");
+        if (
+          params.mode !== undefined &&
+          params.mode !== "say" &&
+          params.mode !== "guidance" &&
+          params.mode !== "context"
+        ) {
+          throw new VoiceCallCommandInputError("mode must be say, guidance or context");
         }
         return commands.steer({
           callId: normalizeOptionalString(params.callId),

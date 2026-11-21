@@ -78,6 +78,18 @@ it("fences response completion from a closed Google provider generation", async 
 });
 
 describe("Google lazy realtime voice", () => {
+  it("passes context to the loaded bridge once it is ready, and not during startup", async () => {
+    const mock = createMockRealtimeBridge();
+    const addContext = vi.fn(() => true);
+    createRealtimeBridgeMock.mockReturnValueOnce({ ...mock.bridge, addContext });
+    const { bridge } = createLazyRealtimeBridge();
+    expect(bridge.addContext?.("[early]")).toBe(false);
+    await bridge.connect();
+    createRealtimeBridgeMock.mock.calls.at(-1)?.[0]?.onReady?.();
+    expect(bridge.addContext?.("[Mathias is speaking now.]")).toBe(true);
+    expect(addContext).toHaveBeenCalledExactlyOnceWith("[Mathias is speaking now.]");
+  });
+
   it("evicts the oldest lazy audio when the startup chunk limit is reached", async () => {
     const { bridge } = createLazyRealtimeBridge();
 

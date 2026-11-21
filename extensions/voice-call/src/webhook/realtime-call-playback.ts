@@ -36,6 +36,19 @@ export const modelQuietWindows = new Map<string, (ms: number) => void>();
 /** Long enough for those replies (0.5-1.5 s, starting within 1 s of the result). */
 export const SILENT_TOOL_QUIET_MS = 3_000;
 
+/** Per live call: text the model reads with its next turn without answering it; false if unsupported. */
+export const modelContextNotes = new Map<string, (text: string) => boolean>();
+
+export function sendSilentContext(session: RealtimeVoiceBridgeSession | undefined, text: string) {
+  // SAFETY: OpenClaw cores before addContext lack it on the session; it is checked before use.
+  const live = session as Partial<RealtimeVoiceBridgeSession> | undefined;
+  try {
+    return typeof live?.addContext === "function" ? live.addContext(text) : false;
+  } catch {
+    return false;
+  }
+}
+
 function wantsHoldGate(call: CallRecord): boolean {
   const room = call.metadata?.room;
   return Boolean(
@@ -251,6 +264,8 @@ export function createRealtimeCallPlayback(params: {
     quietUntil = Date.now() + ms;
   };
   modelQuietWindows.set(callId, quiet);
+  const pushContext = (text: string) => sendSilentContext(params.getSession(), text);
+  modelContextNotes.set(callId, pushContext);
   if (room) {
     console.log(`[voice-call] hold gate detector=${room.detector} ${tag}`);
     roomHoldGates.set(callId, room.gate);
@@ -304,6 +319,9 @@ export function createRealtimeCallPlayback(params: {
     room?.close();
     if (modelQuietWindows.get(callId) === quiet) {
       modelQuietWindows.delete(callId);
+    }
+    if (modelContextNotes.get(callId) === pushContext) {
+      modelContextNotes.delete(callId);
     }
     closeActivity();
   };

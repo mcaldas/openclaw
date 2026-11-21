@@ -114,6 +114,13 @@ function createLazyGoogleRealtimeVoiceBridge(
       pendingUserMessages.push(text);
       pendingUserMessageBytes += messageBytes;
     },
+    // Context only makes sense on a live session: nothing is queued during startup.
+    addContext: (text) => {
+      const bridge = lifecycle.bridge;
+      return lifecycle.isActive() && bridgeReady && bridge
+        ? (bridge.addContext?.(text) ?? false)
+        : false;
+    },
     triggerGreeting: (instructions) => {
       if (!lifecycle.isActive()) {
         return;

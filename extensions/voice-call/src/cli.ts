@@ -428,10 +428,10 @@ export function registerVoiceCallCli(params: {
     .description("Steer an active realtime call through its owning Gateway")
     .requiredOption("--call-id <id>", "Call ID")
     .requiredOption("--message <text>", "Owner instruction")
-    .option("--mode <mode>", "guidance or say", "guidance")
+    .option("--mode <mode>", "guidance, say, or context (silent: read, not answered)", "guidance")
     .action(async (options: { callId: string; message: string; mode: string }) => {
-      if (options.mode !== "say" && options.mode !== "guidance") {
-        throw new Error("mode must be say or guidance");
+      if (options.mode !== "say" && options.mode !== "guidance" && options.mode !== "context") {
+        throw new Error("mode must be say, guidance or context");
       }
       const gateway = await callVoiceCallGateway("voicecall.steer", {
         callId: options.callId,

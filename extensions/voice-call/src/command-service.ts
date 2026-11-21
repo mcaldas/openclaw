@@ -3,6 +3,7 @@ import { timestampMsToIsoString } from "openclaw/plugin-sdk/number-runtime";
 import { CallBriefSchema } from "./call-brief.js";
 import type { VoiceCallRuntime } from "./runtime.js";
 import { TerminalStates, type CallRecord, type OutboundCallOptions } from "./types.js";
+import { modelContextNotes } from "./webhook/realtime-call-playback.js";
 
 export class VoiceCallCommandInputError extends Error {}
 
@@ -111,7 +112,7 @@ export function createVoiceCallCommandService(ensureRuntime: () => Promise<Voice
     async steer(params: {
       callId?: string;
       message?: string;
-      mode?: "say" | "guidance";
+      mode?: "say" | "guidance" | "context";
       requesterSessionKey?: string;
       operator?: boolean;
       assertCurrent?: () => void;
@@ -138,6 +139,16 @@ export function createVoiceCallCommandService(ensureRuntime: () => Promise<Voice
       }
       if (!rt.config.realtime.enabled) {
         throw new VoiceCallCommandInputError("Steering requires an active realtime call");
+      }
+      if (params.mode === "context") {
+        // Read by the model with its next turn, never answered by itself.
+        const sent = modelContextNotes.get(callId)?.(
+          `[Owner note, do not reply to it: ${message}]`,
+        );
+        if (!sent) {
+          throw new VoiceCallCommandInputError("Silent context is not available for this call");
+        }
+        return { success: true };
       }
       await rt.manager.updateCallMetadata(
         call,

@@ -22,6 +22,7 @@ import { buildSpeakerTranscript, SPEAKER_TRANSCRIPT_PROMPT } from "./speaker-tra
 import type { CallRecord } from "./types.js";
 import type { VoiceCallWebhookServer } from "./webhook.js";
 import {
+  modelContextNotes,
   modelQuietWindows,
   roomHoldGates,
   SILENT_TOOL_QUIET_MS,
@@ -64,6 +65,7 @@ export function wireCallRooms(params: {
       }
     },
     allowHold: (callId, allowed) => roomHoldGates.get(callId)?.setEnabled(allowed),
+    context: (callId, text) => modelContextNotes.get(callId)?.(text) ?? false,
     recordOwner: (call) => config.recording.enabled && recordingWanted(call),
     log: (message) => params.log.info(`[voice-call] ${message}`),
   });

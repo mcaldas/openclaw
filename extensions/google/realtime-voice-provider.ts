@@ -70,6 +70,12 @@ import {
   supportsAsyncFunctionCalling,
   supportsClientContentInterrupt,
 } from "./realtime-voice-model-contract.js";
+import {
+  isMulawSilence,
+  isPcm16Silence,
+  parsePcmSampleRate,
+  sendGoogleLiveContext,
+} from "./realtime-voice-session-io.js";
 
 const GOOGLE_REALTIME_DEFAULT_VOICE = "Kore";
 const GOOGLE_REALTIME_DEFAULT_API_VERSION = "v1beta";
@@ -308,29 +314,6 @@ function buildGoogleLiveConnectConfig(
       : {}),
     ...(thinkingConfig ? { thinkingConfig } : {}),
   };
-}
-
-function parsePcmSampleRate(mimeType: string | undefined): number {
-  const match = mimeType?.match(/(?:^|[;,\s])rate=(\d+)/i);
-  const parsed = match ? Number.parseInt(match[1] ?? "", 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 24_000;
-}
-
-function isMulawSilence(audio: Buffer): boolean {
-  return audio.length > 0 && audio.every((sample) => sample === 0xff);
-}
-
-function isPcm16Silence(audio: Buffer): boolean {
-  const samples = Math.floor(audio.length / 2);
-  if (samples === 0) {
-    return false;
-  }
-  for (let i = 0; i < samples; i += 1) {
-    if (audio.readInt16LE(i * 2) !== 0) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function formatGoogleLiveCloseEvent(
@@ -618,6 +601,12 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       turns: [{ role: "user", parts: [{ text: normalized }] }],
       turnComplete: true,
     });
+  }
+
+  /** Read with the next turn, never answered; 3.1 Live models only take realtime input. */
+  addContext(text: string): boolean {
+    const ready = this.connected && this.sessionConfigured && !isGemini31LiveModel(this.model);
+    return sendGoogleLiveContext(this.session, text, ready);
   }
 
   triggerGreeting(instructions?: string): void {

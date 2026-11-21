@@ -170,6 +170,23 @@ describe("OpenAI realtime voice bridge events", () => {
     await bridge.close();
   });
 
+  it("adds context as a user item without requesting a response", async () => {
+    const { bridge, socket } = await connectBridge({ getPlaybackState: () => [] });
+    expect(bridge.addContext?.(" [Mathias is speaking now.] ")).toBe(true);
+    expect(sentOfType(socket, "conversation.item.create").at(-1)).toEqual(
+      expect.objectContaining({
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "[Mathias is speaking now.]" }],
+        },
+      }),
+    );
+    expect(hasSentEventType(socket, "response.create")).toBe(false);
+    expect(bridge.addContext?.("  ")).toBe(false);
+    await bridge.close();
+  });
+
   it("cancels a requested response without truncating a fully heard item", async () => {
     const { bridge, socket, onAudio } = await connectBridge({
       getPlaybackState: () => [],

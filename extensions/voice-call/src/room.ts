@@ -109,6 +109,8 @@ export function createCallRooms(deps: {
   note: (callId: CallId, instructions: string) => void;
   /** Off while the owner is on the line: Jarvis must hear everything then, music or not. */
   allowHold: (callId: CallId, allowed: boolean) => void;
+  /** Context Jarvis reads without answering (who is speaking); false when the core cannot. */
+  context?: (callId: CallId, text: string) => boolean;
   recordOwner: (call: CallRecord) => boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -158,7 +160,9 @@ export function createCallRooms(deps: {
   };
 
   const notes = {
-    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you. Their voices may sound alike: before you answer either of them, call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} to learn who just spoke, and trust it over the voice.`,
+    joined: `${ownerName} has just joined this call and can hear everyone. In one short sentence, tell the other person that ${ownerName} is on the line. Then let them talk, and speak only when one of them addresses you. Stay on the call until ${ownerName} tells you that you can go. Their voices may sound alike: trust the bracketed "is speaking now" notes, and call ${REALTIME_VOICE_WHO_SPOKE_TOOL_NAME} before you answer whenever you have no such note for that turn.`,
+    ownerSpeaking: `[${ownerName} is speaking now, from ${ownerName}'s own phone.]`,
+    calleeSpeaking: "[The person you called is speaking now, from the line you called.]",
     noAnswer: `${ownerName} did not answer. Tell the other person briefly, then carry on with the task yourself, or ask for a direct number or a good time for ${ownerName} to call back.`,
     left: `${ownerName} has left the call. Carry on with the task yourself; if it is done, say goodbye and end the call.`,
   };
@@ -192,7 +196,9 @@ export function createCallRooms(deps: {
       return;
     }
     speakers.set(callId, [...recent.slice(-2), { who, at: now() }]);
-    log(`room ${room.name}: ${who} speaking`);
+    const pushed =
+      deps.context?.(callId, who === "owner" ? notes.ownerSpeaking : notes.calleeSpeaking) ?? false;
+    log(`room ${room.name}: ${who} speaking${pushed ? " (note sent)" : ""}`);
   };
   /** What openclaw_who_spoke tells Jarvis: who spoke last, by phone leg, and who before. */
   const whoSpoke = (callId: CallId) => {

@@ -166,6 +166,23 @@ export class OpenAIRealtimeBridge extends OpenAIRealtimeProtocol implements Real
     this.requestResponseCreate(options);
   }
 
+  /** A user item without response.create: read with the next response, never answered by itself. */
+  addContext(text: string): boolean {
+    const normalized = text.trim();
+    if (!normalized || !this.isConnected() || !this.transport.socket) {
+      return false;
+    }
+    this.sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: normalized }],
+      },
+    });
+    return true;
+  }
+
   triggerGreeting(instructions?: string): void {
     if (!this.isConnected() || !this.transport.socket) {
       return;

@@ -341,6 +341,11 @@ export type RealtimeVoiceBridge = {
     text: string,
     options?: { toolChoice?: { type: "function"; name: string } },
   ): void;
+  /**
+   * Adds text the model reads with its next turn without starting a response (for example who is
+   * speaking on a phone call). Returns false when this provider or model cannot do that.
+   */
+  addContext?(text: string): boolean;
   triggerGreeting?(instructions?: string): void;
   handleBargeIn?(options?: RealtimeVoiceBargeInOptions): void;
   /**

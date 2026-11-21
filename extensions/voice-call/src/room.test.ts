@@ -40,6 +40,7 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
   };
   const note = vi.fn();
   const allowHold = vi.fn();
+  const context = vi.fn((_callId: string, _text: string) => true);
   const rooms = createCallRooms({
     config: {
       fromNumber: "+972500000002",
@@ -53,6 +54,7 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     webhookUrl: () => "https://gw.example/voice/webhook",
     note,
     allowHold,
+    context,
     recordOwner: () => true,
     now: () => clock,
     log: () => {},
@@ -79,6 +81,7 @@ function setup(call: CallRecord, config: Record<string, unknown> = {}) {
     carrier,
     note,
     allowHold,
+    context,
     speech,
     status,
     tick: (ms: number) => (clock += ms),
@@ -193,7 +196,7 @@ describe("createCallRooms", () => {
 
   it("tells Jarvis who spoke last, by phone leg, once both people are in the room", async () => {
     const call = makeCall({ agentCallSid: "CA-agent" });
-    const { rooms, speech, status, tick } = setup(call);
+    const { rooms, speech, status, tick, context } = setup(call);
     await speech("CA-callee");
     expect(rooms.whoSpoke("call-1")).toMatchObject({ note: "Mathias is not on the call." });
     await rooms.addOwner("call-1");
@@ -213,6 +216,12 @@ describe("createCallRooms", () => {
     });
     await speech("CA-callee");
     expect(rooms.whoSpoke("call-1")).toMatchObject({ lastSpeaker: "the person you called" });
+    // Each change of speaker is also pushed as silent context; repeats and Jarvis's leg are not.
+    expect(context.mock.calls.map(([, text]) => text)).toEqual([
+      "[The person you called is speaking now, from the line you called.]",
+      "[Mathias is speaking now, from Mathias's own phone.]",
+      "[The person you called is speaking now, from the line you called.]",
+    ]);
     await status("owner", "completed", "CA-leg-1");
     expect(rooms.whoSpoke("call-1")).toMatchObject({ note: "Mathias is not on the call." });
   });

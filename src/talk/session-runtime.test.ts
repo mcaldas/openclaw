@@ -148,6 +148,21 @@ describe("realtime voice bridge session runtime", () => {
       expect(acknowledgeMark).not.toHaveBeenCalled();
     },
   );
+  it("passes context through without requesting a response, and refuses once closed", () => {
+    const addContext = vi.fn(() => true);
+    const sendUserMessage = vi.fn();
+    const { session } = createSession({}, makeBridge({ addContext, sendUserMessage }));
+    expect(session.addContext("[Mathias is speaking now.]")).toBe(true);
+    expect(addContext).toHaveBeenCalledWith("[Mathias is speaking now.]");
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(session.addContext("  ")).toBe(false);
+    void session.close();
+    expect(session.addContext("late")).toBe(false);
+    expect(addContext).toHaveBeenCalledTimes(1);
+    const { session: plain } = createSession({}, makeBridge());
+    expect(plain.addContext("no provider support")).toBe(false);
+  });
+
   it("routes provider output through an open audio sink", () => {
     const sendAudio = vi.fn();
     const clearAudio = vi.fn();
